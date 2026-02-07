@@ -1,0 +1,4661 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Kat Plani Uretici - PAiY Uyumlu</title>
+  <link
+    rel="stylesheet"
+    href="https://cdn.jsdelivr.net/npm/@stlite/browser@0.76.0/build/stlite.css"
+  />
+  <style>
+    /* Yukleme ekrani */
+    #loading-screen {
+      position: fixed;
+      top: 0; left: 0; right: 0; bottom: 0;
+      background: #1a1a2e;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      z-index: 9999;
+      color: #e0e0e0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    }
+    #loading-screen h1 {
+      font-size: 1.8rem;
+      margin-bottom: 1rem;
+      color: #ffffff;
+    }
+    #loading-screen p {
+      font-size: 1rem;
+      opacity: 0.7;
+      margin: 0.3rem 0;
+    }
+    .spinner {
+      width: 40px;
+      height: 40px;
+      border: 4px solid rgba(255,255,255,0.2);
+      border-top-color: #4fc3f7;
+      border-radius: 50%;
+      animation: spin 1s linear infinite;
+      margin-bottom: 1.5rem;
+    }
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+  </style>
+</head>
+<body>
+  <!-- Yukleme ekrani -->
+  <div id="loading-screen">
+    <div class="spinner"></div>
+    <h1>Kat Plani Uretici</h1>
+    <p>Python ortami yukleniyor (Pyodide)...</p>
+    <p style="font-size: 0.85rem; opacity: 0.5;">Ilk acilista 15-30 saniye surebilir</p>
+  </div>
+
+  <div id="root"></div>
+
+  <script src="https://cdn.jsdelivr.net/npm/@stlite/browser@0.76.0/build/stlite.js"></script>
+
+  <script>
+    // Yukleme ekranini stlite hazir olunca kaldir
+    const observer = new MutationObserver(function(mutations) {
+      const stApp = document.querySelector('.stApp');
+      if (stApp) {
+        const loadingScreen = document.getElementById('loading-screen');
+        if (loadingScreen) {
+          loadingScreen.style.transition = 'opacity 0.5s';
+          loadingScreen.style.opacity = '0';
+          setTimeout(() => loadingScreen.remove(), 500);
+        }
+        observer.disconnect();
+      }
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
+
+    stlite.mount(
+      {
+        requirements: ["numpy", "matplotlib", "pydantic"],
+        entrypoint: "app.py",
+        files: {
+          "app.py": `"""
+Kat Planı Üretici v2 - Ana Streamlit Uygulaması
+Çok daireli, mimari kalitede kat planı üretimi.
+"""
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent))
+
+import streamlit as st
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+
+from core.models import BuildingInput, RoomCountInput, CompassDirection
+from core.building_codes import BuildingCodes
+from core.genetic import generate_plans
+from export.svg_renderer import render_plan
+
+try:
+    from export.dxf_exporter import export_to_dxf
+    HAS_DXF = True
+except ImportError:
+    HAS_DXF = False
+
+# ── Sayfa Yapılandırması ─────────────────────────────────────────────────────
+
+st.set_page_config(
+    page_title="Kat Planı Üretici",
+    page_icon="🏗️",
+    layout="wide",
+    initial_sidebar_state="collapsed",
+)
+
+@st.cache_resource
+def load_codes():
+    return BuildingCodes()
+
+codes = load_codes()
+
+# ── Ana Sayfa ─────────────────────────────────────────────────────────────────
+
+st.title("Kat Planı Üretici")
+st.caption("Bina bilgilerini girin, 4 farklı alternatif kat planı üretelim. AI kullanılmaz - algoritmik.")
+
+# ── Giriş Formu ──────────────────────────────────────────────────────────────
+
+col_left, col_right = st.columns([1, 1])
+
+with col_left:
+    st.subheader("Bina Boyutları")
+
+    input_method = st.radio(
+        "Boyut giriş yöntemi",
+        ["Kenar uzunlukları", "Toplam m²"],
+        horizontal=True,
+    )
+
+    if input_method == "Kenar uzunlukları":
+        long_side = st.number_input("Uzun kenar (m)", min_value=10.0, max_value=200.0, value=40.0, step=1.0)
+        short_side = st.number_input("Kısa kenar (m)", min_value=8.0, max_value=100.0, value=20.0, step=1.0)
+    else:
+        total_m2 = st.number_input("Toplam alan (m²)", min_value=100.0, max_value=10000.0, value=800.0, step=50.0)
+        aspect = st.slider("En/boy oranı", min_value=1.0, max_value=3.0, value=2.0, step=0.1)
+        long_side = (total_m2 * aspect) ** 0.5
+        short_side = total_m2 / long_side
+        st.info(f"Hesaplanan: {long_side:.1f}m x {short_side:.1f}m = {long_side * short_side:.0f} m²")
+
+    # Dikdörtgen ön izleme
+    st.markdown("**Bina Ön İzleme:**")
+    fig_p, ax_p = plt.subplots(figsize=(4, 2.5))
+    rect_patch = mpatches.FancyBboxPatch(
+        (0, 0), long_side, short_side,
+        boxstyle="round,pad=0.1", facecolor="#E3F2FD", edgecolor="#1565C0", linewidth=2,
+    )
+    ax_p.add_patch(rect_patch)
+    ax_p.set_xlim(-2, long_side + 2)
+    ax_p.set_ylim(-2, short_side + 2)
+    ax_p.set_aspect("equal")
+    ax_p.text(long_side / 2, -1, f"{long_side:.1f} m", ha="center", fontsize=10)
+    ax_p.text(-1, short_side / 2, f"{short_side:.1f} m", ha="center", fontsize=10, rotation=90)
+    ax_p.text(long_side / 2, short_side / 2, f"{long_side * short_side:.0f} m²",
+              ha="center", va="center", fontsize=14, fontweight="bold", color="#1565C0")
+    ax_p.axis("off")
+    st.pyplot(fig_p, use_container_width=True)
+    plt.close(fig_p)
+
+    # Yön seçimi
+    st.subheader("Yön (Pusula)")
+    north_option = st.selectbox(
+        "Üst kenar hangi yöne bakıyor?",
+        options=[
+            ("Kuzey", CompassDirection.NORTH),
+            ("Güney", CompassDirection.SOUTH),
+            ("Doğu", CompassDirection.EAST),
+            ("Batı", CompassDirection.WEST),
+        ],
+        format_func=lambda x: x[0],
+        index=0,
+    )
+    north_facing = north_option[1]
+
+with col_right:
+    st.subheader("Bina Özellikleri")
+
+    col_a, col_b = st.columns(2)
+    with col_a:
+        apartments_per_floor = st.number_input(
+            "Katta kaç daire?", min_value=1, max_value=10, value=2,
+        )
+    with col_b:
+        has_elevator = st.checkbox("Asansör var", value=True)
+
+    num_floors = st.number_input("Toplam kat (zemin dahil)", min_value=1, max_value=30, value=5)
+    if num_floors > 1:
+        st.info("Not: Şu an tek kat planı üretilecek. Çok kat desteği ileride.")
+
+    st.divider()
+    st.subheader("Her Daire İçin Oda Sayıları")
+
+    col_a, col_b = st.columns(2)
+    with col_a:
+        n_salon = st.number_input("Salon", min_value=0, max_value=5, value=1)
+        n_yatak = st.number_input("Yatak Odası", min_value=0, max_value=10, value=2)
+        n_oda = st.number_input("Oda (genel)", min_value=0, max_value=10, value=0)
+
+    with col_b:
+        n_mutfak = st.number_input("Mutfak", min_value=0, max_value=3, value=1)
+        n_banyo = st.number_input("Banyo", min_value=0, max_value=5, value=1)
+        n_tuvalet = st.number_input("WC", min_value=0, max_value=5, value=1)
+
+    total_rooms = n_salon + n_yatak + n_oda + n_mutfak + n_banyo + n_tuvalet
+    st.metric("Daire Başına Oda", total_rooms)
+    st.metric("Toplam Daire", apartments_per_floor)
+    st.metric("Kat Alanı", f"{long_side * short_side:.0f} m²")
+
+# ── Tasarla Butonu ────────────────────────────────────────────────────────────
+
+st.divider()
+
+if st.button("🏗️  Planları Üret", type="primary", use_container_width=True):
+    if total_rooms == 0:
+        st.error("En az 1 oda seçmelisiniz.")
+    else:
+        building = BuildingInput(
+            long_side=long_side,
+            short_side=short_side,
+            north_facing=north_facing,
+            num_floors=num_floors,
+            has_elevator=has_elevator,
+            apartments_per_floor=apartments_per_floor,
+        )
+        room_counts = RoomCountInput(
+            salon=n_salon, yatak_odasi=n_yatak, oda=n_oda,
+            mutfak=n_mutfak, banyo=n_banyo, tuvalet=n_tuvalet,
+        )
+
+        # PAİY uyumluluk kontrolleri
+        from core.building_layout import compute_building_layout
+        zones = compute_building_layout(building, codes)
+        if zones.warnings:
+            for w in zones.warnings:
+                if w.startswith("⚠️"):
+                    st.warning(w)
+                else:
+                    st.info(w)
+
+        with st.spinner("Planlar üretiliyor..."):
+            plans = generate_plans(building, room_counts, codes, n_alternatives=4)
+
+        if not plans:
+            st.error("Plan üretilemedi. Farklı boyutlar deneyin.")
+        else:
+            st.success(f"{len(plans)} alternatif plan üretildi!")
+            st.session_state["plans"] = plans
+
+# ── Planları Göster ───────────────────────────────────────────────────────────
+
+if "plans" in st.session_state:
+    plans = st.session_state["plans"]
+
+    st.divider()
+    st.subheader("Alternatif Planlar")
+
+    cols = st.columns(2)
+    for i, plan in enumerate(plans[:4]):
+        with cols[i % 2]:
+            fig = render_plan(plan, figsize=(10, 7))
+            st.pyplot(fig, use_container_width=True)
+            plt.close(fig)
+
+            col_btn1, col_btn2 = st.columns(2)
+            with col_btn1:
+                if st.button(f"🔍 Büyüt", key=f"zoom_{i}"):
+                    st.session_state["zoomed_plan"] = i
+            with col_btn2:
+                if HAS_DXF:
+                    dxf_bytes = export_to_dxf(plan)
+                    if dxf_bytes:
+                        st.download_button(
+                            f"📥 DXF İndir",
+                            data=dxf_bytes,
+                            file_name=f"kat_plani_{plan.plan_id}.dxf",
+                            mime="application/dxf",
+                            key=f"dxf_{i}",
+                        )
+                else:
+                    # PNG indirme (stlite/Pyodide icin DXF yoksa)
+                    import io
+                    buf = io.BytesIO()
+                    fig_dl = render_plan(plan, figsize=(16, 12))
+                    fig_dl.savefig(buf, format="png", dpi=150, bbox_inches="tight")
+                    plt.close(fig_dl)
+                    st.download_button(
+                        f"📥 PNG İndir",
+                        data=buf.getvalue(),
+                        file_name=f"kat_plani_{plan.plan_id}.png",
+                        mime="image/png",
+                        key=f"png_{i}",
+                    )
+
+    if "zoomed_plan" in st.session_state:
+        idx = st.session_state["zoomed_plan"]
+        if idx < len(plans):
+            st.divider()
+            st.subheader(f"Detaylı Görünüm: {plans[idx].plan_id}")
+            fig_big = render_plan(plans[idx], figsize=(16, 12))
+            st.pyplot(fig_big, use_container_width=True)
+            plt.close(fig_big)
+
+            st.markdown("**Oda Detayları:**")
+            room_data = []
+            for room in plans[idx].rooms:
+                room_data.append({
+                    "Oda": room.label.replace("\\n", " - "),
+                    "Net Alan (m²)": f"{room.area:.1f}",
+                    "Genişlik (m)": f"{room.rect.w:.2f}",
+                    "Uzunluk (m)": f"{room.rect.h:.2f}",
+                    "Daire": f"Daire {room.apartment_id + 1}" if room.apartment_id >= 0 else "Ortak",
+                })
+            st.table(room_data)
+
+            if st.button("✖️ Kapat"):
+                del st.session_state["zoomed_plan"]
+                st.rerun()
+
+with st.sidebar:
+    st.markdown("### Ayarlar")
+    st.page_link("pages/admin.py", label="⚙️ Yapı Yönetmeliği Ayarları")
+    st.divider()
+    st.caption("Kat Planı Üretici v2.0")
+    st.caption("AI kullanılmaz - Algoritmik plan üretimi")
+    st.caption(f"Merdiven şaftı: {codes.stairs_width}m genişlik (tam kat yüksekliği) | "
+               f"Asansör kuyusu: {codes.elevator_width}m genişlik (tam kat yüksekliği)")
+    st.caption(f"Koridor: {codes.raw.get('building_corridor', {}).get('min_width', 1.5)}m | "
+               f"PAİY Madde 29/31/34 uyumlu")
+`,
+          "core/__init__.py": ``,
+          "core/models.py": `"""
+Veri modelleri - Kat Planı Üretici v2
+Çok daireli bina desteği, duvar kalınlığı, mobilya.
+"""
+
+from __future__ import annotations
+
+from enum import Enum
+from typing import Optional
+
+from pydantic import BaseModel, Field
+import math
+
+
+# ── Yön (Pusula) ─────────────────────────────────────────────────────────────
+
+class CompassDirection(str, Enum):
+    NORTH = "north"
+    SOUTH = "south"
+    EAST = "east"
+    WEST = "west"
+
+
+# ── Oda Tipleri ───────────────────────────────────────────────────────────────
+
+class RoomType(str, Enum):
+    SALON = "salon"
+    YATAK_ODASI = "yatak_odasi"
+    ODA = "oda"
+    MUTFAK = "mutfak"
+    BANYO = "banyo"
+    TUVALET = "tuvalet"
+    ANTRE = "antre"
+    KORIDOR_DAIRE = "koridor_daire"     # Daire iç koridoru
+    KORIDOR_BINA = "koridor_bina"       # Bina ortak koridoru
+    MERDIVEN = "merdiven"
+    ASANSOR = "asansor"
+
+
+ROOM_DISPLAY_NAMES = {
+    RoomType.SALON: "Salon",
+    RoomType.YATAK_ODASI: "Yatak Odası",
+    RoomType.ODA: "Oda",
+    RoomType.MUTFAK: "Mutfak",
+    RoomType.BANYO: "Banyo",
+    RoomType.TUVALET: "WC",
+    RoomType.ANTRE: "Antre",
+    RoomType.KORIDOR_DAIRE: "Koridor",
+    RoomType.KORIDOR_BINA: "Koridor",
+    RoomType.MERDIVEN: "Merdiven",
+    RoomType.ASANSOR: "Asansör",
+}
+
+
+# ── Kullanıcı Girdisi ────────────────────────────────────────────────────────
+
+class BuildingInput(BaseModel):
+    """Kullanıcının girdiği bina bilgileri."""
+    long_side: float = Field(..., gt=0, description="Uzun kenar (metre)")
+    short_side: float = Field(..., gt=0, description="Kısa kenar (metre)")
+    north_facing: CompassDirection = Field(default=CompassDirection.NORTH)
+    num_floors: int = Field(default=1, ge=1)
+    has_elevator: bool = Field(default=True)
+    apartments_per_floor: int = Field(default=2, ge=1, le=10)
+
+    @property
+    def width(self) -> float:
+        return self.long_side
+
+    @property
+    def height(self) -> float:
+        return self.short_side
+
+
+class RoomCountInput(BaseModel):
+    """Her DAİRE için oda sayıları."""
+    salon: int = Field(default=1, ge=0)
+    yatak_odasi: int = Field(default=2, ge=0)
+    oda: int = Field(default=0, ge=0)
+    mutfak: int = Field(default=1, ge=0)
+    banyo: int = Field(default=1, ge=0)
+    tuvalet: int = Field(default=1, ge=0)
+
+    def to_room_list(self) -> list[RoomType]:
+        """Oda sayılarını düz listeye çevir."""
+        rooms: list[RoomType] = []
+        for _ in range(self.salon):
+            rooms.append(RoomType.SALON)
+        for _ in range(self.yatak_odasi):
+            rooms.append(RoomType.YATAK_ODASI)
+        for _ in range(self.oda):
+            rooms.append(RoomType.ODA)
+        for _ in range(self.mutfak):
+            rooms.append(RoomType.MUTFAK)
+        for _ in range(self.banyo):
+            rooms.append(RoomType.BANYO)
+        for _ in range(self.tuvalet):
+            rooms.append(RoomType.TUVALET)
+        return rooms
+
+
+class UserInput(BaseModel):
+    building: BuildingInput
+    rooms: RoomCountInput
+
+
+# ── Geometri ──────────────────────────────────────────────────────────────────
+
+class Rect(BaseModel):
+    """Dikdörtgen: sol-alt köşe (x, y) + genişlik + yükseklik."""
+    x: float
+    y: float
+    w: float
+    h: float
+
+    @property
+    def area(self) -> float:
+        return self.w * self.h
+
+    @property
+    def cx(self) -> float:
+        return self.x + self.w / 2
+
+    @property
+    def cy(self) -> float:
+        return self.y + self.h / 2
+
+    @property
+    def min_dim(self) -> float:
+        return min(self.w, self.h)
+
+    @property
+    def x2(self) -> float:
+        return self.x + self.w
+
+    @property
+    def y2(self) -> float:
+        return self.y + self.h
+
+    def overlaps(self, other: "Rect") -> bool:
+        if self.x >= other.x2 or other.x >= self.x2:
+            return False
+        if self.y >= other.y2 or other.y >= self.y2:
+            return False
+        return True
+
+    def touches_edge(self, container: "Rect", tol: float = 0.02) -> dict[str, bool]:
+        return {
+            "south": abs(self.y - container.y) < tol,
+            "north": abs(self.y2 - container.y2) < tol,
+            "west": abs(self.x - container.x) < tol,
+            "east": abs(self.x2 - container.x2) < tol,
+        }
+
+    def shared_edge_length(self, other: "Rect", tol: float = 0.02) -> float:
+        # Yatay kenar teması
+        if abs(self.x2 - other.x) < tol or abs(other.x2 - self.x) < tol:
+            ys = max(self.y, other.y)
+            ye = min(self.y2, other.y2)
+            return max(0, ye - ys)
+        # Dikey kenar teması
+        if abs(self.y2 - other.y) < tol or abs(other.y2 - self.y) < tol:
+            xs = max(self.x, other.x)
+            xe = min(self.x2, other.x2)
+            return max(0, xe - xs)
+        return 0.0
+
+
+class Point(BaseModel):
+    x: float
+    y: float
+
+
+# ── Kapı/Pencere/Duvar ───────────────────────────────────────────────────────
+
+class DoorPlacement(BaseModel):
+    wall_side: str          # "north"/"south"/"east"/"west"
+    position: float         # duvar boyunca konum
+    width: float = 0.90
+    swing_inside: bool = True   # Kapı odanın içine mi açılıyor
+    connects_to: Optional[str] = None
+
+
+class WindowPlacement(BaseModel):
+    wall_side: str
+    position: float
+    width: float = 1.20
+    height: float = 1.20
+
+
+class WallSegment(BaseModel):
+    start: Point
+    end: Point
+    thickness: float
+    is_exterior: bool = False
+
+
+# ── Yerleştirilmiş Oda ───────────────────────────────────────────────────────
+
+class PlacedRoom(BaseModel):
+    room_type: RoomType
+    room_id: str
+    rect: Rect
+    doors: list[DoorPlacement] = Field(default_factory=list)
+    windows: list[WindowPlacement] = Field(default_factory=list)
+    apartment_id: int = 0      # Hangi daire (-1 = ortak alan)
+    net_area: Optional[float] = None  # Duvar düşüldükten sonra net alan
+
+    @property
+    def area(self) -> float:
+        return self.net_area if self.net_area is not None else self.rect.area
+
+    @property
+    def label(self) -> str:
+        name = ROOM_DISPLAY_NAMES.get(self.room_type, self.room_type.value)
+        return f"{name}\\n{self.area:.1f} m²"
+
+
+# ── Kat Planı ─────────────────────────────────────────────────────────────────
+
+class FloorPlan(BaseModel):
+    plan_id: str = "plan"
+    floor: int = 0
+    fitness_score: float = 0.0
+    building_rect: Rect
+    rooms: list[PlacedRoom] = Field(default_factory=list)
+    walls: list[WallSegment] = Field(default_factory=list)
+    apartments_per_floor: int = 1
+
+    @property
+    def total_room_area(self) -> float:
+        return sum(r.area for r in self.rooms)
+`,
+          "core/building_codes.py": `"""
+Türk Yapı Yönetmeliği kısıtları - PAİY (Planlı Alanlar İmar Yönetmeliği) uyumlu.
+Madde referansları: 5, 23, 28, 29, 30, 31, 32, 34, 38, 39.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Optional
+
+from .models import RoomType
+
+DEFAULT_CONFIG_PATH = Path(__file__).parent.parent / "config" / "building_codes_tr.json"
+
+
+class BuildingCodes:
+    def __init__(self, config_path: Optional[Path] = None):
+        self._path = config_path or DEFAULT_CONFIG_PATH
+        self._data: dict = {}
+        self.load()
+
+    def load(self) -> None:
+        with open(self._path, "r", encoding="utf-8") as f:
+            self._data = json.load(f)
+
+    def save(self) -> None:
+        with open(self._path, "w", encoding="utf-8") as f:
+            json.dump(self._data, f, ensure_ascii=False, indent=2)
+
+    @property
+    def raw(self) -> dict:
+        return self._data
+
+    # ── A) Oda / Piyes Minimumları (Madde 29) ────────────────────────
+
+    def min_area(self, room_type: RoomType) -> float:
+        return self._data.get("min_areas", {}).get(room_type.value, 0.0)
+
+    def preferred_area_ratio(self, room_type: RoomType) -> float:
+        return self._data.get("preferred_area_ratios", {}).get(room_type.value, 0.10)
+
+    def min_width(self, room_type: RoomType) -> float:
+        return self._data.get("min_widths", {}).get(room_type.value, 1.0)
+
+    @property
+    def mandatory_rooms(self) -> list[str]:
+        """Madde 5(25), 29(1): zorunlu piyes listesi."""
+        return self._data.get("mandatory_rooms", {}).get(
+            "list", ["salon", "yatak_odasi", "mutfak", "banyo", "tuvalet"]
+        )
+
+    # ── B) Dolaşım Alanları (Madde 29, 30) ──────────────────────────
+
+    @property
+    def building_corridor_width(self) -> float:
+        """Madde 30(1): Bina koridor/giriş holü min genişlik."""
+        return self._data.get("building_corridor", {}).get("min_width", 1.50)
+
+    @property
+    def apartment_corridor_width(self) -> float:
+        """Madde 29(3): Daire içi hol/koridor min genişlik."""
+        return self._data.get("apartment_corridor", {}).get("min_width", 1.20)
+
+    @property
+    def building_entry_width(self) -> float:
+        """Madde 30(1): Bina giriş holü min genişlik."""
+        return self._data.get("building_entry", {}).get("min_width", 1.50)
+
+    # ── C) Merdiven (Madde 31, 38) ──────────────────────────────────
+
+    @property
+    def stairs_width(self) -> float:
+        return self._data.get("stairs", {}).get("width", 3.0)
+
+    @property
+    def stairs_length(self) -> float:
+        return self._data.get("stairs", {}).get("length", 6.0)
+
+    @property
+    def stair_arm_width(self) -> float:
+        """Madde 31(1a): Konut ortak merdiven kolu min 1.20m."""
+        return self._data.get("stairs", {}).get("arm_width", 1.20)
+
+    @property
+    def stair_arm_width_internal(self) -> float:
+        """Madde 31(1a): Daire içi merdiven min 1.00m."""
+        return self._data.get("stairs", {}).get("arm_width_internal", 1.00)
+
+    @property
+    def stair_riser_max(self) -> float:
+        """Madde 31(2a): Asansörlü binada max rıht yüksekliği 0.18m."""
+        return self._data.get("stairs", {}).get("riser_max_with_elevator", 0.18)
+
+    @property
+    def stair_riser_max_no_elevator(self) -> float:
+        """Madde 31(2a): Asansörsüz binada max rıht yüksekliği 0.16m."""
+        return self._data.get("stairs", {}).get("riser_max_without_elevator", 0.16)
+
+    @property
+    def stair_tread_min(self) -> float:
+        """Madde 31(2b): Basamak genişliği min 0.27m."""
+        return self._data.get("stairs", {}).get("tread_min", 0.27)
+
+    @property
+    def stair_landing_min_width(self) -> float:
+        """Madde 31(1a): Kat sahanlığı min genişlik (= kol genişliği)."""
+        return self._data.get("stairs", {}).get("landing_min_width", 1.20)
+
+    @property
+    def handrail_height(self) -> float:
+        """Madde 38(1): Korkuluk yüksekliği min 1.10m."""
+        return self._data.get("stairs", {}).get("handrail_height", 1.10)
+
+    # ── D) Asansör (Madde 5, 34) ────────────────────────────────────
+
+    @property
+    def elevator_width(self) -> float:
+        return self._data.get("elevator_shaft", {}).get("width", 2.5)
+
+    @property
+    def elevator_length(self) -> float:
+        return self._data.get("elevator_shaft", {}).get("length", 2.5)
+
+    @property
+    def elevator_min_floors_required(self) -> int:
+        """Madde 34(1): 4+ kat: asansör montajı zorunlu."""
+        return self._data.get("elevator_shaft", {}).get("min_floors_required", 4)
+
+    @property
+    def elevator_min_floors_space(self) -> int:
+        """Madde 34(1): 3 kat: asansör yeri ayrılmalı."""
+        return self._data.get("elevator_shaft", {}).get("min_floors_space", 3)
+
+    @property
+    def dual_elevator_floors(self) -> int:
+        """Madde 34(4): 10 kat veya 20+ dairede çift asansör zorunlu."""
+        return self._data.get("elevator_shaft", {}).get("dual_elevator_floors", 10)
+
+    @property
+    def dual_elevator_apartments(self) -> int:
+        """Madde 34(4): 20+ dairede çift asansör zorunlu."""
+        return self._data.get("elevator_shaft", {}).get("dual_elevator_apartments", 20)
+
+    @property
+    def fire_elevator_floors(self) -> int:
+        """Madde 34(4): 10+ katlı binalarda yangın asansörü zorunlu."""
+        return self._data.get("elevator_shaft", {}).get("fire_elevator_floors", 10)
+
+    @property
+    def elevator_cabin_min_width(self) -> float:
+        """Madde 34(2): Tek asansör kabin dar kenarı min 1.20m."""
+        return self._data.get("elevator_shaft", {}).get("cabin_min_width", 1.20)
+
+    @property
+    def elevator_cabin_min_area(self) -> float:
+        """Madde 34(2): Tek asansör kabin alanı min 1.80m²."""
+        return self._data.get("elevator_shaft", {}).get("cabin_min_area", 1.80)
+
+    @property
+    def elevator_door_min_width(self) -> float:
+        """Madde 34(2): Asansör kapı net geçiş min 0.90m."""
+        return self._data.get("elevator_shaft", {}).get("door_min_width", 0.90)
+
+    # ── E) Kapı ve Pencere (Madde 39) ───────────────────────────────
+
+    def door_width(self, room_type: RoomType) -> float:
+        doors = self._data.get("doors", {})
+        key = room_type.value
+        if key in doors and isinstance(doors[key], dict):
+            return doors[key].get("width", 0.90)
+        return doors.get("standard", {}).get("width", 0.90)
+
+    @property
+    def building_entry_door_width(self) -> float:
+        """Madde 39(1b): Bina giriş kapısı min 1.50m."""
+        return self._data.get("doors", {}).get("bina_giris", {}).get("width", 1.50)
+
+    @property
+    def apartment_entry_door_width(self) -> float:
+        """Madde 39(1c): Daire giriş kapısı min 1.00m."""
+        return self._data.get("doors", {}).get("giris", {}).get("width", 1.00)
+
+    # ── F) Duvar ve Kat Yükseklikleri (Madde 28) ────────────────────
+
+    @property
+    def outer_wall(self) -> float:
+        return self._data.get("walls", {}).get("outer_thickness", 0.25)
+
+    @property
+    def inner_wall(self) -> float:
+        return self._data.get("walls", {}).get("inner_thickness", 0.15)
+
+    @property
+    def carrier_wall(self) -> float:
+        return self._data.get("walls", {}).get("carrier_thickness", 0.20)
+
+    @property
+    def floor_height(self) -> float:
+        return self._data.get("floor_height", 2.80)
+
+    @property
+    def floor_height_max(self) -> float:
+        """Madde 28(1c): Konut brüt kat yüksekliği max 3.60m."""
+        return self._data.get("floor_height_max", 3.60)
+
+    @property
+    def min_ceiling_height(self) -> float:
+        """Madde 28(4): İskân edilen kat iç yüksekliği min 2.60m."""
+        return self._data.get("min_ceiling_height", 2.60)
+
+    @property
+    def wet_area_ceiling_height(self) -> float:
+        """Madde 28(5): Islak hacim/koridor tavan yüksekliği min 2.20m."""
+        return self._data.get("wet_area_ceiling_height", 2.20)
+
+    # ── G) Parsel ve Yerleşim (Madde 23, 32) ────────────────────────
+
+    @property
+    def setback_front(self) -> float:
+        """Madde 23(1a): Ön bahçe min 5.00m."""
+        return self._data.get("setbacks", {}).get("front_min", 5.00)
+
+    @property
+    def setback_side(self) -> float:
+        """Madde 23(1b): Yan bahçe min 3.00m (4 kata kadar)."""
+        return self._data.get("setbacks", {}).get("side_min", 3.00)
+
+    @property
+    def setback_rear(self) -> float:
+        """Madde 23(1c): Arka bahçe min 3.00m (4 kata kadar)."""
+        return self._data.get("setbacks", {}).get("rear_min", 3.00)
+
+    @property
+    def setback_floor_increment(self) -> float:
+        """Madde 23(1ç): 4 katın üzerinde her kat için +0.50m."""
+        return self._data.get("setbacks", {}).get("floor_increment", 0.50)
+
+    @property
+    def setback_floor_increment_base(self) -> int:
+        """4 kata kadar sabit, sonra artış başlar."""
+        return self._data.get("setbacks", {}).get("floor_increment_base", 4)
+
+    def setback_for_floors(self, n_floors: int, side: str = "side") -> float:
+        """Verilen kat sayısı için bahçe mesafesini hesapla."""
+        base = self.setback_front if side == "front" else (
+            self.setback_side if side == "side" else self.setback_rear
+        )
+        extra_floors = max(0, n_floors - self.setback_floor_increment_base)
+        return base + extra_floors * self.setback_floor_increment
+
+    def lightwell_min(self, n_floors: int) -> tuple[float, float]:
+        """Madde 32: Kat sayısına göre ışıklık min kenar ve alan."""
+        lw = self._data.get("lightwell", {})
+        if n_floors <= lw.get("small_max_floors", 6):
+            return lw.get("small_min_edge", 1.50), lw.get("small_min_area", 4.50)
+        return lw.get("large_min_edge", 2.00), lw.get("large_min_area", 9.00)
+
+    @property
+    def air_shaft_size(self) -> tuple[float, float]:
+        """Madde 32(3): Hava bacası min 0.60×0.60m."""
+        lw = self._data.get("lightwell", {})
+        return lw.get("air_shaft_width", 0.60), lw.get("air_shaft_length", 0.60)
+
+    # ── H) Islak Hacim / Yangın ─────────────────────────────────────
+
+    @property
+    def wet_area_types(self) -> list[str]:
+        return self._data.get("wet_area_types", ["mutfak", "banyo", "tuvalet"])
+
+    def is_wet_area(self, room_type: RoomType) -> bool:
+        return room_type.value in self.wet_area_types
+
+    def needs_exterior_wall(self, room_type: RoomType) -> bool:
+        return room_type in (
+            RoomType.SALON, RoomType.YATAK_ODASI, RoomType.ODA, RoomType.MUTFAK,
+        )
+
+    def needs_window(self, room_type: RoomType) -> bool:
+        return room_type in (
+            RoomType.SALON, RoomType.YATAK_ODASI, RoomType.ODA, RoomType.MUTFAK,
+        )
+
+    @property
+    def requires_separate_stairs_mixed_use(self) -> bool:
+        """Madde 31(5): Karma kullanımda ayrı merdiven evi zorunlu."""
+        return self._data.get("fire_safety", {}).get("separate_stairs_mixed_use", True)
+
+    # ── Diğer ────────────────────────────────────────────────────────
+
+    @property
+    def adjacency_rules(self) -> dict[str, str]:
+        return self._data.get("adjacency_rules", {})
+`,
+          "core/building_layout.py": `"""
+Bina katı düzeni: Çekirdek + bina koridoru + daire bölgeleri.
+
+Yerleşim stratejisi (çift yüklü koridor):
+  - Çekirdek (merdiven şaftı + asansör kuyusu) bir uçta, TAM KAT YÜKSEKLİĞİ
+  - Bina koridoru çekirdekten sağa uzanır
+  - Daireler koridorun iki yanında sıralanır
+
+  +-----+----+---------+---------+---------+
+  |     |    | Daire 1 | Daire 2 | Daire 3 |  <- üst sıra
+  | MER | AS +---------+---------+---------+
+  | Dİ  | AN |     BİNA KORİDORU           |
+  | VEN | SÖR+---------+---------+---------+
+  |     |    | Daire 4 | Daire 5 | Daire 6 |  <- alt sıra
+  +-----+----+---------+---------+---------+
+
+  Merdiven ve asansör tüm kat yüksekliğini kaplar (şaft/kuyu).
+"""
+
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass
+
+from .models import Rect, RoomType, PlacedRoom, FloorPlan, BuildingInput
+from .building_codes import BuildingCodes
+
+
+@dataclass
+class BuildingZones:
+    """Bina düzeni sonucu."""
+    building_rect: Rect
+    stairs_rect: Rect
+    elevator_rect: Rect | None
+    elevator_rect_2: Rect | None       # Çift asansör (Madde 34/4)
+    corridor_rect: Rect
+    apartment_zones: list[Rect]        # Her dairenin sınır dikdörtgeni
+    apartment_corridor_sides: list[str]  # Her daire koridorun hangi tarafında
+    warnings: list[str]                # PAİY uyarıları
+
+
+def compute_building_layout(
+    building: BuildingInput,
+    codes: BuildingCodes,
+) -> BuildingZones:
+    """
+    Bina katı düzenini hesapla.
+    Dış duvar kalınlığı dahil - kullanıcının girdiği boyutlar dış ölçüdür.
+    Merdiven ve asansör şaftı/kuyusu binanın tam iç yüksekliğini kaplar.
+    PAİY uyumluluk kontrolü yapar ve uyarıları döndürür.
+    """
+    ow = codes.outer_wall
+    W = building.width
+    H = building.height
+    warnings: list[str] = []
+
+    building_rect = Rect(x=0, y=0, w=W, h=H)
+
+    # İç alan (dış duvarlar çıkarılmış)
+    inner_x = ow
+    inner_y = ow
+    inner_w = W - 2 * ow
+    inner_h = H - 2 * ow
+
+    # ── PAİY uyumluluk kontrolleri ────────────────────────────────────
+
+    n_floors = building.num_floors
+    total_apartments = building.apartments_per_floor * n_floors
+
+    # Madde 34(1): Asansör zorunluluğu
+    if n_floors >= codes.elevator_min_floors_required and not building.has_elevator:
+        warnings.append(
+            f"⚠️ PAİY Md.34(1): {n_floors} katlı binada asansör zorunludur!"
+        )
+    elif n_floors >= codes.elevator_min_floors_space and not building.has_elevator:
+        warnings.append(
+            f"ℹ️ PAİY Md.34(1): {n_floors} katlı binada asansör yeri ayrılmalıdır."
+        )
+
+    # Madde 34(4): Çift asansör zorunluluğu
+    needs_dual = (
+        n_floors >= codes.dual_elevator_floors
+        or total_apartments >= codes.dual_elevator_apartments
+    )
+    if needs_dual:
+        warnings.append(
+            f"⚠️ PAİY Md.34(4): {n_floors} kat / {total_apartments} daire → "
+            f"min 2 asansör zorunlu (10 kat veya 20+ daire)."
+        )
+
+    # Madde 34(4): Yangın asansörü
+    if n_floors >= codes.fire_elevator_floors:
+        warnings.append(
+            f"ℹ️ PAİY Md.34(4): {n_floors} katlı binada 1 asansör "
+            f"yangına dayanıklı/güç kaynaklı olmalıdır."
+        )
+
+    # Madde 34(5): Sedye asansörü
+    if n_floors >= codes.raw.get("elevator_shaft", {}).get("stretcher_min_floors", 10):
+        warnings.append(
+            f"ℹ️ PAİY Md.34(5): {n_floors} katlı binada sedye asansörü "
+            f"(min 1.20×2.10m, 2.52m²) zorunludur."
+        )
+
+    # ── Çekirdek: Merdiven şaftı + Asansör kuyusu(ları) ──────────────
+
+    stairs_w = codes.stairs_width
+    elev_w = codes.elevator_width
+
+    # Merdiven şaftı: sol tarafta, TAM İÇ YÜKSEKLİK
+    stairs_rect = Rect(
+        x=inner_x,
+        y=inner_y,
+        w=stairs_w,
+        h=inner_h,
+    )
+
+    # Asansör kuyusu(ları)
+    elevator_rect = None
+    elevator_rect_2 = None
+    core_total_w = stairs_w
+
+    if building.has_elevator:
+        elevator_rect = Rect(
+            x=inner_x + stairs_w,
+            y=inner_y,
+            w=elev_w,
+            h=inner_h,
+        )
+        core_total_w = stairs_w + elev_w
+
+        # Çift asansör: ikinci kuyuyu birincinin yanına koy
+        if needs_dual:
+            elevator_rect_2 = Rect(
+                x=inner_x + stairs_w + elev_w,
+                y=inner_y,
+                w=elev_w,
+                h=inner_h,
+            )
+            core_total_w = stairs_w + 2 * elev_w
+
+    # ── Bina koridoru ─────────────────────────────────────────────────
+    corridor_min_w = codes.building_corridor_width
+
+    corridor_rect = Rect(
+        x=inner_x + core_total_w,
+        y=inner_y + (inner_h - corridor_min_w) / 2,
+        w=inner_w - core_total_w,
+        h=corridor_min_w,
+    )
+
+    # ── Daire bölgeleri ───────────────────────────────────────────────
+    n_apts = building.apartments_per_floor
+
+    n_upper = math.ceil(n_apts / 2)
+    n_lower = n_apts - n_upper
+
+    upper_y = corridor_rect.y2
+    upper_h = inner_y + inner_h - upper_y
+
+    lower_y = inner_y
+    lower_h = corridor_rect.y - inner_y
+
+    available_w = corridor_rect.w
+    apt_zones: list[Rect] = []
+    apt_sides: list[str] = []
+
+    if n_upper > 0:
+        apt_w = available_w / n_upper
+        for i in range(n_upper):
+            apt_zones.append(Rect(
+                x=corridor_rect.x + i * apt_w,
+                y=upper_y,
+                w=apt_w,
+                h=upper_h,
+            ))
+            apt_sides.append("north")
+
+    if n_lower > 0:
+        apt_w = available_w / n_lower
+        for i in range(n_lower):
+            apt_zones.append(Rect(
+                x=corridor_rect.x + i * apt_w,
+                y=lower_y,
+                w=apt_w,
+                h=lower_h,
+            ))
+            apt_sides.append("south")
+
+    return BuildingZones(
+        building_rect=building_rect,
+        stairs_rect=stairs_rect,
+        elevator_rect=elevator_rect,
+        elevator_rect_2=elevator_rect_2,
+        corridor_rect=corridor_rect,
+        apartment_zones=apt_zones,
+        apartment_corridor_sides=apt_sides,
+        warnings=warnings,
+    )
+`,
+          "core/apartment_layout.py": `"""
+Daire iç düzeni: Koridor-Şerit (Corridor-Strip) yerleşim algoritması.
+
+Strateji:
+  - Daire koridoru giriş kapısından içeriye doğru uzanır
+  - Odalar koridorun sol ve sağ yanında sıralanır
+  - Her oda SADECE koridora kapı ile bağlanır
+  - Odalar arası geçiş kapısı YOKTUR
+  - Islak alanlar bir arada gruplanır
+
+  +--------+---------+
+  | Salon  | Yatak 1 |
+  |        |         |
+  +--------+---------+
+  |KORİDOR | Banyo   |
+  |(1.2m)  +---------+
+  +--------+ WC      |
+  | Mutfak |         |
+  +--------+---------+
+  | Antre  |
+  +--------+
+  (kapı -> bina koridoru)
+"""
+
+from __future__ import annotations
+
+import random
+from dataclasses import dataclass
+
+from .models import (
+    Rect, RoomType, PlacedRoom, DoorPlacement, WindowPlacement,
+)
+from .building_codes import BuildingCodes
+
+
+@dataclass
+class ApartmentPlan:
+    """Tek daire planı."""
+    rooms: list[PlacedRoom]
+    corridor: PlacedRoom
+    entry: PlacedRoom  # Antre
+    score: float = 0.0
+
+
+def layout_apartment(
+    zone: Rect,
+    room_types: list[RoomType],
+    building_rect: Rect,
+    corridor_side: str,
+    apartment_id: int,
+    codes: BuildingCodes,
+    variant: int = 0,
+) -> ApartmentPlan:
+    """
+    Daire bölgesi içinde odaları yerleştir.
+
+    zone: dairenin sınır dikdörtgeni
+    corridor_side: bina koridorunun daire sınırına göre yönü ("north"/"south")
+      - "north" ise giriş kapısı dairenin güney kenarında (koridora bakan)
+      - "south" ise giriş kapısı dairenin kuzey kenarında
+    """
+    iw = codes.inner_wall  # iç duvar kalınlığı
+    corr_w = codes.raw.get("apartment_corridor", {}).get("min_width", 1.20)
+
+    # Daire iç boyutları (dış duvarlar building_layout'ta zaten hesaplandı)
+    ax, ay = zone.x, zone.y
+    aw, ah = zone.w, zone.h
+
+    # Giriş yönüne göre düzenleme
+    # Koridor dairenin uzun ekseni boyunca uzanır
+    # "north" -> giriş güneyde, koridor aşağıdan yukarıya
+    # "south" -> giriş kuzeyde, koridor yukarıdan aşağıya
+
+    # Koridor ortada dikey olarak geçer
+    # Sol ve sağ şeritler oluşur
+
+    # Varyant'a göre koridor pozisyonu değiştir
+    if variant % 3 == 0:
+        corr_offset_ratio = 0.45  # Sola yakın
+    elif variant % 3 == 1:
+        corr_offset_ratio = 0.55  # Sağa yakın
+    else:
+        corr_offset_ratio = 0.50  # Ortada
+
+    left_w = (aw - corr_w - iw * 2) * corr_offset_ratio
+    right_w = aw - left_w - corr_w - iw * 2
+
+    # Minimum genişlik kontrolü: her şerit en geniş odanın min_width'ini karşılamalı
+    # Sol şerit: yaşam + ıslak, Sağ şerit: yatak odaları (henüz atanmamış, genel min kullan)
+    min_room_w = 2.50  # PAİY yatak odası/oda minimum dar kenar
+    if left_w < min_room_w:
+        left_w = min_room_w
+        right_w = aw - left_w - corr_w - iw * 2
+    if right_w < min_room_w:
+        right_w = min_room_w
+        left_w = aw - right_w - corr_w - iw * 2
+
+    corr_x = ax + left_w + iw
+    left_x = ax
+    right_x = corr_x + corr_w + iw
+
+    # Oda sınıflandırma
+    wet_types = {RoomType.BANYO, RoomType.TUVALET}
+    living_types = {RoomType.SALON, RoomType.MUTFAK}
+    bedroom_types = {RoomType.YATAK_ODASI, RoomType.ODA}
+
+    wet_rooms = [rt for rt in room_types if rt in wet_types]
+    living_rooms = [rt for rt in room_types if rt in living_types]
+    bed_rooms = [rt for rt in room_types if rt in bedroom_types]
+
+    # Varyant'a göre sıralama değiştir
+    if variant % 2 == 1:
+        living_rooms, bed_rooms = bed_rooms, living_rooms
+
+    # Sol şerit: yaşam alanları + ıslak alanlar
+    left_rooms_types = living_rooms + wet_rooms
+    # Sağ şerit: yatak odaları
+    right_rooms_types = bed_rooms
+
+    # Eğer bir taraf çok kalabalıksa dengeleme
+    while len(left_rooms_types) > len(right_rooms_types) + 2 and left_rooms_types:
+        right_rooms_types.append(left_rooms_types.pop())
+    while len(right_rooms_types) > len(left_rooms_types) + 2 and right_rooms_types:
+        left_rooms_types.append(right_rooms_types.pop())
+
+    # Antre alanı: giriş tarafında, koridorun başında
+    antre_h = max(1.5, min(2.5, ah * 0.12))
+
+    if corridor_side == "north":
+        # Giriş güneyde
+        entry_y = ay
+        rooms_start_y = ay + antre_h + iw
+    else:
+        # Giriş kuzeyde
+        entry_y = ay + ah - antre_h
+        rooms_start_y = ay
+
+    rooms_available_h = ah - antre_h - iw
+
+    # Sol şerit odaları yerleştir
+    placed_rooms: list[PlacedRoom] = []
+    room_counter: dict[RoomType, int] = {}
+
+    def _make_id(rt: RoomType) -> str:
+        idx = room_counter.get(rt, 0)
+        room_counter[rt] = idx + 1
+        return f"{rt.value}_{idx}"
+
+    def _place_strip(
+        strip_rooms: list[RoomType],
+        strip_x: float,
+        strip_w: float,
+        start_y: float,
+        avail_h: float,
+        going_up: bool,
+    ) -> list[PlacedRoom]:
+        """Şerit içinde odaları sırala (overflow korumalı, boşluk dolduran)."""
+        if not strip_rooms:
+            return []
+
+        results = []
+        n = len(strip_rooms)
+
+        # Her odaya alan hesapla
+        total_wall = iw * max(0, n - 1)
+        usable_h = avail_h - total_wall
+        if usable_h < 2.0:
+            usable_h = avail_h  # Çok sıkışıksa duvar payını yoksay
+
+        target_areas = []
+        for rt in strip_rooms:
+            min_a = codes.min_area(rt)
+            ratio = codes.preferred_area_ratio(rt)
+            target = max(min_a, usable_h * strip_w * ratio)
+            target_areas.append(target)
+
+        total_target = sum(target_areas)
+        if total_target <= 0:
+            total_target = 1
+
+        # PAİY minimum yükseklikler (altına düşülemez)
+        min_heights = []
+        for i, rt in enumerate(strip_rooms):
+            min_h_area = codes.min_area(rt) / strip_w if strip_w > 0 else 1.5
+            min_h_width = codes.min_width(rt) if strip_w >= codes.min_width(rt) else 1.0
+            min_heights.append(max(min_h_area, min_h_width))
+
+        total_min = sum(min_heights) + total_wall
+
+        if total_min > avail_h + 0.01:
+            # Minimumlar bile sığmıyor - yine de minimumlarda kal (taşma kabul)
+            room_heights = min_heights[:]
+        else:
+            # Minimum üstü alanı orantılı dağıt
+            extra_space = avail_h - total_min
+            target_extras = []
+            for i, rt in enumerate(strip_rooms):
+                desired = usable_h * (target_areas[i] / total_target)
+                extra_for_room = max(0, desired - min_heights[i])
+                target_extras.append(extra_for_room)
+
+            total_target_extra = sum(target_extras)
+            if total_target_extra > 0:
+                extra_scale = min(1.0, extra_space / total_target_extra)
+                room_heights = [
+                    min_heights[i] + target_extras[i] * extra_scale
+                    for i in range(n)
+                ]
+            else:
+                # Tüm odalar zaten minimum boyutta, kalan alanı eşit dağıt
+                room_heights = min_heights[:]
+                if n > 0 and extra_space > 0:
+                    per_room = extra_space / n
+                    room_heights = [h + per_room for h in room_heights]
+
+        # Son odayı kalan alana genişlet (boşluk bırakma)
+        remaining = avail_h - (sum(room_heights) + total_wall)
+        if remaining > 0.05 and room_heights:
+            room_heights[-1] += remaining
+
+        # Odaları yerleştir
+        current_y = start_y
+        for i, rt in enumerate(strip_rooms):
+            room_h = room_heights[i]
+
+            if not going_up:
+                ry = current_y
+                current_y += room_h + iw
+            else:
+                ry = start_y + avail_h - (current_y - start_y) - room_h
+                current_y += room_h + iw
+
+            # Sınır koruması: oda daire bölgesini aşmasın
+            if not going_up:
+                max_y2 = start_y + avail_h
+                if ry + room_h > max_y2 + 0.01:
+                    room_h = max(1.0, max_y2 - ry)
+            else:
+                if ry < start_y - 0.01:
+                    excess = start_y - ry
+                    ry = start_y
+                    room_h = max(1.0, room_h - excess)
+
+            # Net alan (duvar kalınlığı düşülmüş)
+            net_area = max(0, (strip_w - iw) * (room_h - iw))
+
+            room = PlacedRoom(
+                room_type=rt,
+                room_id=_make_id(rt),
+                rect=Rect(x=strip_x, y=ry, w=strip_w, h=room_h),
+                apartment_id=apartment_id,
+                net_area=round(net_area, 1),
+            )
+
+            # Kapı: koridora açılır
+            door_side = "east" if strip_x < corr_x else "west"
+            door_y = ry + room_h / 2
+            room.doors.append(DoorPlacement(
+                wall_side=door_side,
+                position=door_y,
+                width=codes.door_width(rt),
+                swing_inside=True,
+                connects_to="koridor",
+            ))
+
+            # Pencere: dış duvara değiyorsa (dış duvar kalınlığı kadar tolerans)
+            exterior = room.rect.touches_edge(building_rect, tol=0.5)
+            if codes.needs_window(rt):
+                for side, touching in exterior.items():
+                    if touching and side != door_side:
+                        if side in ("north", "south"):
+                            pos = room.rect.cx
+                        else:
+                            pos = room.rect.cy
+                        room.windows.append(WindowPlacement(
+                            wall_side=side,
+                            position=pos,
+                            width=codes.raw.get("windows", {}).get("standard_width", 1.20),
+                            height=codes.raw.get("windows", {}).get("standard_height", 1.20),
+                        ))
+                        break
+
+            results.append(room)
+
+        return results
+
+    going_up = (corridor_side == "north")
+
+    left_placed = _place_strip(
+        left_rooms_types, left_x, left_w,
+        rooms_start_y, rooms_available_h, going_up,
+    )
+    right_placed = _place_strip(
+        right_rooms_types, right_x, right_w,
+        rooms_start_y, rooms_available_h, going_up,
+    )
+
+    placed_rooms.extend(left_placed)
+    placed_rooms.extend(right_placed)
+
+    # Koridor
+    corridor = PlacedRoom(
+        room_type=RoomType.KORIDOR_DAIRE,
+        room_id=f"koridor_daire_{apartment_id}",
+        rect=Rect(x=corr_x, y=rooms_start_y, w=corr_w, h=rooms_available_h),
+        apartment_id=apartment_id,
+    )
+
+    # Antre: daire genişliğinde (strip boşluklarını kapatır)
+    # Giriş seviyesinde tüm daire genişliğini kaplar
+    entry = PlacedRoom(
+        room_type=RoomType.ANTRE,
+        room_id=f"antre_{apartment_id}",
+        rect=Rect(x=ax, y=entry_y, w=aw, h=antre_h),
+        apartment_id=apartment_id,
+        net_area=round(max(0, (aw - iw * 2) * (antre_h - iw)), 1),
+    )
+
+    # Giriş kapısı (bina koridoruna)
+    door_side = "south" if corridor_side == "north" else "north"
+    entry.doors.append(DoorPlacement(
+        wall_side=door_side,
+        position=entry.rect.cx,
+        width=codes.door_width(RoomType.ANTRE),
+        swing_inside=True,
+        connects_to="bina_koridoru",
+    ))
+
+    # Skor hesapla
+    score = _score_apartment(placed_rooms, building_rect, codes)
+
+    return ApartmentPlan(
+        rooms=placed_rooms,
+        corridor=corridor,
+        entry=entry,
+        score=score,
+    )
+
+
+def _score_apartment(
+    rooms: list[PlacedRoom],
+    building_rect: Rect,
+    codes: BuildingCodes,
+) -> float:
+    """Daire düzeni kalite skoru."""
+    if not rooms:
+        return 0.0
+
+    score = 0.5  # Başlangıç
+
+    # Dış duvar erişimi
+    exterior_need = 0
+    exterior_have = 0
+    for r in rooms:
+        if codes.needs_exterior_wall(r.room_type):
+            exterior_need += 1
+            touches = r.rect.touches_edge(building_rect, tol=0.1)
+            if any(touches.values()):
+                exterior_have += 1
+
+    if exterior_need > 0:
+        score += 0.3 * (exterior_have / exterior_need)
+
+    # Min alan uyumu
+    area_ok = 0
+    area_total = 0
+    for r in rooms:
+        min_a = codes.min_area(r.room_type)
+        if min_a > 0:
+            area_total += 1
+            if r.area >= min_a * 0.85:
+                area_ok += 1
+    if area_total > 0:
+        score += 0.2 * (area_ok / area_total)
+
+    return min(1.0, score)
+
+
+def generate_apartment_variants(
+    zone: Rect,
+    room_types: list[RoomType],
+    building_rect: Rect,
+    corridor_side: str,
+    apartment_id: int,
+    codes: BuildingCodes,
+    n_variants: int = 8,
+) -> list[ApartmentPlan]:
+    """Birden fazla daire düzeni varyantı üret."""
+    variants = []
+    for v in range(n_variants):
+        plan = layout_apartment(
+            zone, room_types, building_rect,
+            corridor_side, apartment_id, codes, variant=v,
+        )
+        variants.append(plan)
+
+    variants.sort(key=lambda p: p.score, reverse=True)
+    return variants
+`,
+          "core/genetic.py": `"""
+Plan üretim motoru v2.
+Bina düzeni + daire yerleşimi + 4 alternatif seçimi.
+"""
+
+from __future__ import annotations
+
+from .models import (
+    BuildingInput, RoomCountInput, RoomType, Rect,
+    PlacedRoom, FloorPlan, WallSegment, Point,
+)
+from .building_codes import BuildingCodes
+from .building_layout import compute_building_layout
+from .apartment_layout import generate_apartment_variants
+
+
+def generate_plans(
+    building: BuildingInput,
+    room_counts: RoomCountInput,
+    codes: BuildingCodes,
+    n_alternatives: int = 4,
+) -> list[FloorPlan]:
+    """
+    Ana giriş noktası: 4 alternatif kat planı üret.
+
+    Akış:
+    1. Bina düzenini hesapla (çekirdek + koridor + daire bölgeleri)
+    2. Her daire bölgesi için oda yerleşimi üret
+    3. Farklı varyantları birleştirerek 4 alternatif oluştur
+    4. Duvarları ve doğrulamayı ekle
+    """
+    room_types = room_counts.to_room_list()
+
+    # 1. Bina düzeni
+    zones = compute_building_layout(building, codes)
+
+    # 2. Her daire için varyantlar üret
+    all_apt_variants: list[list] = []  # [daire_idx][varyant_idx]
+    for apt_idx, (zone, side) in enumerate(
+        zip(zones.apartment_zones, zones.apartment_corridor_sides)
+    ):
+        variants = generate_apartment_variants(
+            zone=zone,
+            room_types=room_types,
+            building_rect=zones.building_rect,
+            corridor_side=side,
+            apartment_id=apt_idx,
+            codes=codes,
+            n_variants=max(4, n_alternatives * 2),
+        )
+        all_apt_variants.append(variants)
+
+    # 3. Varyant kombinasyonlarından alternatif planlar oluştur
+    plans: list[FloorPlan] = []
+
+    for alt_idx in range(n_alternatives):
+        plan_rooms: list[PlacedRoom] = []
+        total_score = 0.0
+
+        # Ortak alanlar
+        plan_rooms.append(PlacedRoom(
+            room_type=RoomType.MERDIVEN,
+            room_id="merdiven_0",
+            rect=zones.stairs_rect,
+            apartment_id=-1,
+        ))
+
+        if zones.elevator_rect:
+            plan_rooms.append(PlacedRoom(
+                room_type=RoomType.ASANSOR,
+                room_id="asansor_0",
+                rect=zones.elevator_rect,
+                apartment_id=-1,
+            ))
+
+        if zones.elevator_rect_2:
+            plan_rooms.append(PlacedRoom(
+                room_type=RoomType.ASANSOR,
+                room_id="asansor_1",
+                rect=zones.elevator_rect_2,
+                apartment_id=-1,
+            ))
+
+        plan_rooms.append(PlacedRoom(
+            room_type=RoomType.KORIDOR_BINA,
+            room_id="koridor_bina_0",
+            rect=zones.corridor_rect,
+            apartment_id=-1,
+        ))
+
+        # Her daire için varyant seç
+        for apt_idx, variants in enumerate(all_apt_variants):
+            v_idx = alt_idx % len(variants)
+            apt_plan = variants[v_idx]
+
+            plan_rooms.extend(apt_plan.rooms)
+            plan_rooms.append(apt_plan.corridor)
+            plan_rooms.append(apt_plan.entry)
+            total_score += apt_plan.score
+
+        avg_score = total_score / max(1, len(all_apt_variants))
+
+        # Duvarları oluştur
+        walls = _generate_walls(plan_rooms, zones.building_rect, codes)
+
+        plan = FloorPlan(
+            plan_id=f"alternatif_{alt_idx + 1}",
+            building_rect=zones.building_rect,
+            rooms=plan_rooms,
+            walls=walls,
+            fitness_score=avg_score,
+            apartments_per_floor=building.apartments_per_floor,
+        )
+
+        plans.append(plan)
+
+    return plans
+
+
+def _generate_walls(
+    rooms: list[PlacedRoom],
+    building_rect: Rect,
+    codes: BuildingCodes,
+) -> list[WallSegment]:
+    """Tüm duvar segmentlerini oluştur."""
+    walls: list[WallSegment] = []
+    ow = codes.outer_wall
+    iw = codes.inner_wall
+
+    # Dış duvarlar
+    bx, by = building_rect.x, building_rect.y
+    bx2, by2 = building_rect.x2, building_rect.y2
+
+    walls.append(WallSegment(start=Point(x=bx, y=by), end=Point(x=bx2, y=by), thickness=ow, is_exterior=True))
+    walls.append(WallSegment(start=Point(x=bx, y=by2), end=Point(x=bx2, y=by2), thickness=ow, is_exterior=True))
+    walls.append(WallSegment(start=Point(x=bx, y=by), end=Point(x=bx, y=by2), thickness=ow, is_exterior=True))
+    walls.append(WallSegment(start=Point(x=bx2, y=by), end=Point(x=bx2, y=by2), thickness=ow, is_exterior=True))
+
+    # İç duvarlar: odalar arası paylaşılan kenarlar
+    processed = set()
+    for i, ra in enumerate(rooms):
+        for j, rb in enumerate(rooms):
+            if i >= j:
+                continue
+            key = (min(ra.room_id, rb.room_id), max(ra.room_id, rb.room_id))
+            if key in processed:
+                continue
+
+            shared = ra.rect.shared_edge_length(rb.rect, tol=0.05)
+            if shared < 0.1:
+                continue
+
+            processed.add(key)
+            wall = _find_shared_wall(ra.rect, rb.rect, iw)
+            if wall:
+                walls.append(wall)
+
+    return walls
+
+
+def _find_shared_wall(a: Rect, b: Rect, thickness: float) -> WallSegment | None:
+    tol = 0.05
+    if abs(a.x2 - b.x) < tol:
+        ys, ye = max(a.y, b.y), min(a.y2, b.y2)
+        if ye > ys:
+            return WallSegment(start=Point(x=a.x2, y=ys), end=Point(x=a.x2, y=ye), thickness=thickness)
+    if abs(b.x2 - a.x) < tol:
+        ys, ye = max(a.y, b.y), min(a.y2, b.y2)
+        if ye > ys:
+            return WallSegment(start=Point(x=a.x, y=ys), end=Point(x=a.x, y=ye), thickness=thickness)
+    if abs(a.y2 - b.y) < tol:
+        xs, xe = max(a.x, b.x), min(a.x2, b.x2)
+        if xe > xs:
+            return WallSegment(start=Point(x=xs, y=a.y2), end=Point(x=xe, y=a.y2), thickness=thickness)
+    if abs(b.y2 - a.y) < tol:
+        xs, xe = max(a.x, b.x), min(a.x2, b.x2)
+        if xe > xs:
+            return WallSegment(start=Point(x=xs, y=a.y), end=Point(x=xe, y=a.y), thickness=thickness)
+    return None
+`,
+          "core/fitness.py": `"""
+Adım 5: Fitness (uygunluk) fonksiyonları.
+Her plan alternatifinin kalitesini 0-1 arası puanlama.
+"""
+
+from __future__ import annotations
+
+from .models import Rect, RoomType, PlacedRoom, FloorPlan
+from .building_codes import BuildingCodes
+
+
+def evaluate_fitness(
+    rooms: list[PlacedRoom],
+    building_rect: Rect,
+    target_areas: list[float],
+    codes: BuildingCodes,
+) -> float:
+    """
+    Plan kalitesini 0-1 arası puanla.
+    
+    Bileşenler:
+    1. Alan dağılımı skoru (hedef alanlara yakınlık)
+    2. Minimum alan/genişlik uyumu (sert kısıt)
+    3. Dış duvar erişimi skoru
+    4. Komşuluk skoru
+    5. Kompaktlık (toplam alan verimliliği)
+    """
+    if not rooms:
+        return 0.0
+
+    scores = []
+    weights = []
+
+    # 1. Alan dağılımı (ağırlık: 0.30)
+    area_score = _area_distribution_score(rooms, target_areas)
+    scores.append(area_score)
+    weights.append(0.30)
+
+    # 2. Minimum kısıt uyumu (ağırlık: 0.25)
+    constraint_score = _constraint_score(rooms, codes)
+    scores.append(constraint_score)
+    weights.append(0.25)
+
+    # 3. Dış duvar erişimi (ağırlık: 0.20)
+    exterior_score = _exterior_access_score(rooms, building_rect, codes)
+    scores.append(exterior_score)
+    weights.append(0.20)
+
+    # 4. Komşuluk (ağırlık: 0.15)
+    adj_score = _adjacency_score(rooms, codes)
+    scores.append(adj_score)
+    weights.append(0.15)
+
+    # 5. Kompaktlık (ağırlık: 0.10)
+    compact_score = _compactness_score(rooms, building_rect)
+    scores.append(compact_score)
+    weights.append(0.10)
+
+    total = sum(s * w for s, w in zip(scores, weights))
+    return max(0.0, min(1.0, total))
+
+
+def _area_distribution_score(rooms: list[PlacedRoom], target_areas: list[float]) -> float:
+    """Her odanın alanının hedef alana ne kadar yakın olduğu."""
+    if not target_areas or len(rooms) != len(target_areas):
+        return 0.5
+
+    total_error = 0.0
+    for room, target in zip(rooms, target_areas):
+        if target <= 0:
+            continue
+        error = abs(room.area - target) / target
+        total_error += min(error, 1.0)  # max %100 hata
+
+    avg_error = total_error / len(rooms)
+    return max(0.0, 1.0 - avg_error)
+
+
+def _constraint_score(rooms: list[PlacedRoom], codes: BuildingCodes) -> float:
+    """Minimum alan ve genişlik kısıtlarına uyum."""
+    if not rooms:
+        return 0.0
+
+    violations = 0
+    total_checks = 0
+
+    for room in rooms:
+        rt = room.room_type
+        # Koridor ve çekirdek elemanları atla
+        if rt in (RoomType.KORIDOR_DAIRE, RoomType.KORIDOR_BINA, RoomType.MERDIVEN, RoomType.ASANSOR):
+            continue
+
+        # Minimum alan
+        min_a = codes.min_area(rt)
+        if min_a > 0:
+            total_checks += 1
+            if room.area < min_a * 0.9:  # %10 tolerans
+                violations += 1
+
+        # Minimum genişlik
+        min_w = codes.min_width(rt)
+        if min_w > 0:
+            total_checks += 1
+            if room.rect.min_dim < min_w * 0.9:
+                violations += 1
+
+    if total_checks == 0:
+        return 1.0
+    return max(0.0, 1.0 - (violations / total_checks))
+
+
+def _exterior_access_score(
+    rooms: list[PlacedRoom],
+    building_rect: Rect,
+    codes: BuildingCodes,
+) -> float:
+    """Dış duvar gerektiren odaların gerçekten dış duvara erişimi var mı."""
+    need_exterior = 0
+    has_exterior = 0
+
+    for room in rooms:
+        if codes.needs_exterior_wall(room.room_type):
+            need_exterior += 1
+            touches = room.rect.touches_edge(building_rect, tolerance=0.05)
+            if any(touches.values()):
+                has_exterior += 1
+
+    if need_exterior == 0:
+        return 1.0
+    return has_exterior / need_exterior
+
+
+def _adjacency_score(rooms: list[PlacedRoom], codes: BuildingCodes) -> float:
+    """Komşuluk kurallarına uyum skoru."""
+    rules = codes.adjacency_rules
+    if not rules:
+        return 1.0
+
+    satisfied = 0
+    total = 0
+
+    # Oda tipine göre hızlı lookup
+    rooms_by_type: dict[str, list[PlacedRoom]] = {}
+    for r in rooms:
+        rt = r.room_type.value
+        if rt not in rooms_by_type:
+            rooms_by_type[rt] = []
+        rooms_by_type[rt].append(r)
+
+    for rule_key, relation in rules.items():
+        parts = rule_key.split("_")
+        if len(parts) < 2:
+            continue
+
+        # "mutfak_salon" -> mutfak ve salon bitişik olmalı
+        if relation == "adjacent":
+            type_a = parts[0]
+            type_b = parts[1]
+            if type_a in rooms_by_type and type_b in rooms_by_type:
+                total += 1
+                for ra in rooms_by_type[type_a]:
+                    for rb in rooms_by_type[type_b]:
+                        if ra.rect.shared_edge_length(rb.rect) > 0.5:
+                            satisfied += 1
+                            break
+                    else:
+                        continue
+                    break
+
+        elif relation == "near":
+            type_a = parts[0]
+            type_b = parts[1]
+            if type_a in rooms_by_type and type_b in rooms_by_type:
+                total += 1
+                for ra in rooms_by_type[type_a]:
+                    for rb in rooms_by_type[type_b]:
+                        # "Yakın" = merkezler arası mesafe < 8m
+                        dist = ((ra.rect.cx - rb.rect.cx) ** 2 + (ra.rect.cy - rb.rect.cy) ** 2) ** 0.5
+                        if dist < 8.0:
+                            satisfied += 1
+                            break
+                    else:
+                        continue
+                    break
+
+    if total == 0:
+        return 1.0
+    return satisfied / total
+
+
+def _compactness_score(rooms: list[PlacedRoom], building_rect: Rect) -> float:
+    """Alan kullanım verimliliği."""
+    total_room_area = sum(r.area for r in rooms)
+    if building_rect.area <= 0:
+        return 0.0
+    efficiency = total_room_area / building_rect.area
+    # %60-90 arası iyi
+    if efficiency > 0.90:
+        return 1.0
+    elif efficiency > 0.60:
+        return (efficiency - 0.60) / 0.30
+    else:
+        return efficiency / 0.60 * 0.5
+`,
+          "core/furniture.py": `"""
+Mobilya tanımları ve otomatik yerleştirme.
+Her oda tipine uygun şematik mobilyalar standart boyutlarda.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Callable
+
+from .models import Rect, RoomType
+
+
+@dataclass
+class FurnitureItem:
+    """Tek mobilya parçası."""
+    name: str
+    width: float   # metre
+    height: float  # metre (plandaki uzunluk)
+    x: float = 0   # yerleşim x
+    y: float = 0   # yerleşim y
+    rotation: int = 0  # 0, 90, 180, 270 derece
+    shape: str = "rect"  # "rect", "circle", "L", "arc"
+
+
+# ── Standart Mobilya Boyutları ────────────────────────────────────────────────
+
+# Yatak odası
+DOUBLE_BED = FurnitureItem("Çift Kişilik Yatak", 1.60, 2.00)
+SINGLE_BED = FurnitureItem("Tek Kişilik Yatak", 0.90, 2.00)
+NIGHTSTAND = FurnitureItem("Komodin", 0.45, 0.45)
+WARDROBE = FurnitureItem("Dolap", 0.60, 1.80)
+
+# Salon
+SOFA_3SEAT = FurnitureItem("3'lü Koltuk", 2.10, 0.85)
+SOFA_2SEAT = FurnitureItem("2'li Koltuk", 1.50, 0.85)
+COFFEE_TABLE = FurnitureItem("Sehpa", 1.10, 0.55)
+TV_UNIT = FurnitureItem("TV Ünitesi", 1.60, 0.40)
+DINING_TABLE_4 = FurnitureItem("Yemek Masası (4)", 1.20, 0.80)
+DINING_TABLE_6 = FurnitureItem("Yemek Masası (6)", 1.60, 0.90)
+CHAIR = FurnitureItem("Sandalye", 0.42, 0.42)
+
+# Mutfak
+KITCHEN_COUNTER = FurnitureItem("Tezgah", 0.60, 2.40)
+KITCHEN_SINK = FurnitureItem("Evye", 0.60, 0.50)
+STOVE = FurnitureItem("Ocak", 0.60, 0.60)
+FRIDGE = FurnitureItem("Buzdolabı", 0.65, 0.70)
+
+# Banyo
+BATHTUB = FurnitureItem("Küvet", 0.75, 1.70)
+SHOWER = FurnitureItem("Duşakabin", 0.90, 0.90)
+BATH_SINK = FurnitureItem("Lavabo", 0.50, 0.40, shape="arc")
+TOILET = FurnitureItem("Klozet", 0.40, 0.65)
+WASHING_MACHINE = FurnitureItem("Çamaşır Mak.", 0.60, 0.60)
+
+# WC
+WC_TOILET = FurnitureItem("Klozet", 0.38, 0.55)
+WC_SINK = FurnitureItem("Lavabo", 0.35, 0.30, shape="arc")
+
+# Genel
+DESK = FurnitureItem("Çalışma Masası", 1.20, 0.60)
+DESK_CHAIR = FurnitureItem("Sandalye", 0.45, 0.45, shape="circle")
+
+
+def get_room_furniture(room_type: RoomType, room_w: float, room_h: float) -> list[FurnitureItem]:
+    """
+    Oda tipine ve boyutuna göre mobilya listesi döndür.
+    Mobilyalar odanın sol-alt köşesine göre koordinatlarla yerleştirilir.
+    """
+    margin = 0.15  # Duvardan boşluk
+    items: list[FurnitureItem] = []
+
+    if room_type == RoomType.YATAK_ODASI:
+        items = _layout_bedroom(room_w, room_h, margin)
+    elif room_type == RoomType.ODA:
+        items = _layout_room(room_w, room_h, margin)
+    elif room_type == RoomType.SALON:
+        items = _layout_living(room_w, room_h, margin)
+    elif room_type == RoomType.MUTFAK:
+        items = _layout_kitchen(room_w, room_h, margin)
+    elif room_type == RoomType.BANYO:
+        items = _layout_bathroom(room_w, room_h, margin)
+    elif room_type == RoomType.TUVALET:
+        items = _layout_wc(room_w, room_h, margin)
+
+    return items
+
+
+def _layout_bedroom(w: float, h: float, m: float) -> list[FurnitureItem]:
+    """Yatak odası mobilyaları."""
+    items = []
+    bed = FurnitureItem("Yatak", 1.60, 2.00)
+
+    if w >= 3.0 and h >= 3.0:
+        # Yatak üst duvara yaslanmış, ortada
+        bed.x = (w - bed.width) / 2
+        bed.y = h - bed.height - m
+        items.append(bed)
+
+        # Komodinler yatağın iki yanında
+        ns1 = FurnitureItem("Komodin", 0.45, 0.45)
+        ns1.x = bed.x - ns1.width - 0.05
+        ns1.y = bed.y + bed.height - ns1.height
+        if ns1.x >= m:
+            items.append(ns1)
+
+        ns2 = FurnitureItem("Komodin", 0.45, 0.45)
+        ns2.x = bed.x + bed.width + 0.05
+        ns2.y = bed.y + bed.height - ns2.height
+        if ns2.x + ns2.width <= w - m:
+            items.append(ns2)
+
+        # Dolap karşı duvarda
+        wardrobe = FurnitureItem("Dolap", min(1.80, w * 0.4), 0.60)
+        wardrobe.x = m
+        wardrobe.y = m
+        items.append(wardrobe)
+    else:
+        # Küçük oda: tek kişilik yatak
+        bed = FurnitureItem("Yatak", 0.90, 2.00)
+        bed.x = m
+        bed.y = h - bed.height - m
+        items.append(bed)
+
+    return items
+
+
+def _layout_room(w: float, h: float, m: float) -> list[FurnitureItem]:
+    """Genel oda (çalışma odası vb.)."""
+    items = []
+    # Çalışma masası
+    desk = FurnitureItem("Masa", min(1.20, w * 0.5), 0.60)
+    desk.x = m
+    desk.y = h - desk.height - m
+    items.append(desk)
+
+    # Sandalye
+    chair = FurnitureItem("Sandalye", 0.45, 0.45, shape="circle")
+    chair.x = desk.x + desk.width / 2 - chair.width / 2
+    chair.y = desk.y - chair.height - 0.2
+    items.append(chair)
+
+    # Tek yatak veya koltuk
+    if h > 3.5:
+        bed = FurnitureItem("Yatak", 0.90, 2.00)
+        bed.x = w - bed.width - m
+        bed.y = m
+        items.append(bed)
+
+    return items
+
+
+def _layout_living(w: float, h: float, m: float) -> list[FurnitureItem]:
+    """Salon mobilyaları."""
+    items = []
+
+    # Koltuk grubu
+    sofa = FurnitureItem("Koltuk", min(2.10, w * 0.5), 0.85)
+    sofa.x = m
+    sofa.y = h - sofa.height - m
+    items.append(sofa)
+
+    # Sehpa
+    table = FurnitureItem("Sehpa", 1.10, 0.55)
+    table.x = sofa.x + (sofa.width - table.width) / 2
+    table.y = sofa.y - table.height - 0.5
+    if table.y > m:
+        items.append(table)
+
+    # TV ünitesi karşıda
+    tv = FurnitureItem("TV", min(1.60, w * 0.4), 0.40)
+    tv.x = sofa.x + (sofa.width - tv.width) / 2
+    tv.y = m
+    items.append(tv)
+
+    # Yemek masası (eğer alan yetiyorsa)
+    if w > 4.5:
+        dtable = FurnitureItem("Yemek Masası", 1.20, 0.80)
+        dtable.x = w - dtable.width - m
+        dtable.y = h - dtable.height - m - 0.3
+        items.append(dtable)
+
+        # Sandalyeler
+        for i in range(4):
+            ch = FurnitureItem("Sandalye", 0.38, 0.38)
+            if i < 2:
+                ch.x = dtable.x + 0.15 + i * 0.55
+                ch.y = dtable.y - ch.height - 0.05
+            else:
+                ch.x = dtable.x + 0.15 + (i - 2) * 0.55
+                ch.y = dtable.y + dtable.height + 0.05
+            items.append(ch)
+
+    return items
+
+
+def _layout_kitchen(w: float, h: float, m: float) -> list[FurnitureItem]:
+    """Mutfak mobilyaları (L tezgah)."""
+    items = []
+    counter_depth = 0.60
+
+    # Alt tezgah (sol duvar boyunca)
+    counter_len = min(h - 2 * m, h * 0.7)
+    counter = FurnitureItem("Tezgah", counter_depth, counter_len)
+    counter.x = m
+    counter.y = h - counter_len - m
+    items.append(counter)
+
+    # Üst tezgah (üst duvar boyunca)
+    top_len = min(w - counter_depth - 2 * m, w * 0.5)
+    if top_len > 0.5:
+        top_counter = FurnitureItem("Tezgah", top_len, counter_depth)
+        top_counter.x = counter.x + counter_depth
+        top_counter.y = h - counter_depth - m
+        items.append(top_counter)
+
+    # Buzdolabı
+    fridge = FurnitureItem("Buzdolabı", 0.65, 0.70)
+    fridge.x = w - fridge.width - m
+    fridge.y = h - fridge.height - m
+    items.append(fridge)
+
+    # Ocak (tezgah üzerinde simge)
+    stove = FurnitureItem("Ocak", 0.55, 0.55, shape="circle")
+    stove.x = counter.x + 0.03
+    stove.y = counter.y + counter_len * 0.4
+    items.append(stove)
+
+    # Evye (tezgah üzerinde simge)
+    sink = FurnitureItem("Evye", 0.45, 0.40, shape="arc")
+    sink.x = counter.x + 0.08
+    sink.y = counter.y + counter_len * 0.7
+    items.append(sink)
+
+    return items
+
+
+def _layout_bathroom(w: float, h: float, m: float) -> list[FurnitureItem]:
+    """Banyo mobilyaları."""
+    items = []
+
+    # Duş/küvet
+    if w >= 2.5 and h >= 2.5:
+        tub = FurnitureItem("Küvet", 0.75, 1.70)
+        tub.x = m
+        tub.y = h - tub.height - m
+        items.append(tub)
+    else:
+        shower = FurnitureItem("Duş", 0.85, 0.85)
+        shower.x = m
+        shower.y = h - shower.height - m
+        items.append(shower)
+
+    # Lavabo
+    sink = FurnitureItem("Lavabo", 0.50, 0.40, shape="arc")
+    sink.x = w - sink.width - m
+    sink.y = h - sink.height - m
+    items.append(sink)
+
+    # Klozet
+    toilet = FurnitureItem("Klozet", 0.40, 0.65)
+    toilet.x = w - toilet.width - m
+    toilet.y = m
+    items.append(toilet)
+
+    # Çamaşır makinesi (eğer alan yetiyorsa)
+    if w > 2.2 and h > 2.5:
+        wm = FurnitureItem("Çam.Mak.", 0.60, 0.60)
+        wm.x = m
+        wm.y = m
+        items.append(wm)
+
+    return items
+
+
+def _layout_wc(w: float, h: float, m: float) -> list[FurnitureItem]:
+    """WC mobilyaları."""
+    items = []
+
+    # Klozet
+    toilet = FurnitureItem("Klozet", 0.38, 0.55)
+    toilet.x = (w - toilet.width) / 2
+    toilet.y = m
+    items.append(toilet)
+
+    # Küçük lavabo
+    sink = FurnitureItem("Lavabo", 0.35, 0.30, shape="arc")
+    sink.x = (w - sink.width) / 2
+    sink.y = h - sink.height - m
+    items.append(sink)
+
+    return items
+`,
+          "core/slicing_tree.py": `"""
+Adım 3: Slicing Tree (İkili Uzay Bölümleme) motoru.
+
+Bir dikdörtgeni oda sayısı kadar alt-dikdörtgene böler.
+Her bölme: yatay veya dikey kesim + kesim oranı.
+
+Genom temsili:
+  - cut_orientations: [0 veya 1] * (n_rooms - 1)  → 0=dikey, 1=yatay
+  - cut_ratios: [0.2 .. 0.8] * (n_rooms - 1)      → kesim pozisyonu oranı
+  - room_assignment: permütasyon [0..n_rooms-1]     → yaprak-oda eşlemesi
+"""
+
+from __future__ import annotations
+
+import random
+from dataclasses import dataclass, field
+from typing import Optional
+
+from .models import Rect
+
+
+@dataclass
+class SlicingNode:
+    """İkili bölme ağacı düğümü."""
+    rect: Optional[Rect] = None         # Hesaplanmış dikdörtgen
+    orientation: int = 0                 # 0=dikey (V), 1=yatay (H)
+    ratio: float = 0.5                   # Kesim oranı (0-1)
+    left: Optional["SlicingNode"] = None
+    right: Optional["SlicingNode"] = None
+    leaf_index: Optional[int] = None     # Yapraksa, yaprak sıra numarası
+
+    @property
+    def is_leaf(self) -> bool:
+        return self.left is None and self.right is None
+
+
+def build_tree(n_leaves: int, orientations: list[int], ratios: list[float]) -> SlicingNode:
+    """
+    n_leaves yapraklı dengeli bir slicing tree oluştur.
+    orientations ve ratios listeleri uzunluğu = n_leaves - 1.
+    
+    Recursive olarak:
+    - 1 yaprak -> yaprak düğüm (parametre gerekmez)
+    - n yaprak -> 1 kesim parametresi + sol(n//2) + sağ(n - n//2)
+    - Toplam parametre: n - 1 (her iç düğüm için 1)
+    """
+    if n_leaves <= 0:
+        raise ValueError("En az 1 yaprak gerekli")
+
+    if n_leaves == 1:
+        return SlicingNode(leaf_index=0)
+
+    # Parametre yetersizse varsayılan kullan
+    if not orientations or not ratios:
+        orientations = [0] * (n_leaves - 1)
+        ratios = [0.5] * (n_leaves - 1)
+
+    # Dengeli bölme: sol tarafa yarısı, sağ tarafa kalanı
+    left_count = n_leaves // 2
+    right_count = n_leaves - left_count
+
+    # Bu düğümün kesimi (ilk parametre)
+    node = SlicingNode(
+        orientation=orientations[0],
+        ratio=ratios[0],
+    )
+
+    # Kalan parametreleri sol ve sağ alt ağaçlara dağıt
+    # Sol alt ağaç: (left_count - 1) parametre gerekiyor
+    # Sağ alt ağaç: (right_count - 1) parametre gerekiyor
+    left_n_params = max(0, left_count - 1)
+    right_n_params = max(0, right_count - 1)
+
+    left_orientations = orientations[1:1 + left_n_params]
+    left_ratios = ratios[1:1 + left_n_params]
+
+    right_orientations = orientations[1 + left_n_params:1 + left_n_params + right_n_params]
+    right_ratios = ratios[1 + left_n_params:1 + left_n_params + right_n_params]
+
+    node.left = build_tree(left_count, left_orientations, left_ratios)
+    node.right = build_tree(right_count, right_orientations, right_ratios)
+
+    return node
+
+
+def compute_rects(node: SlicingNode, container: Rect) -> None:
+    """Ağaçtaki her düğümün dikdörtgenini hesapla (yerinde günceller)."""
+    node.rect = container
+
+    if node.is_leaf:
+        return
+
+    if node.orientation == 0:
+        # Dikey kesim: sol ve sağ
+        split_x = container.x + container.w * node.ratio
+        left_rect = Rect(x=container.x, y=container.y, w=split_x - container.x, h=container.h)
+        right_rect = Rect(x=split_x, y=container.y, w=container.x + container.w - split_x, h=container.h)
+    else:
+        # Yatay kesim: alt ve üst
+        split_y = container.y + container.h * node.ratio
+        left_rect = Rect(x=container.x, y=container.y, w=container.w, h=split_y - container.y)
+        right_rect = Rect(x=container.x, y=split_y, w=container.w, h=container.y + container.h - split_y)
+
+    if node.left:
+        compute_rects(node.left, left_rect)
+    if node.right:
+        compute_rects(node.right, right_rect)
+
+
+def get_leaves(node: SlicingNode) -> list[SlicingNode]:
+    """Tüm yaprak düğümlerini döndür (sol-sağ sırasıyla)."""
+    if node.is_leaf:
+        return [node]
+    result = []
+    if node.left:
+        result.extend(get_leaves(node.left))
+    if node.right:
+        result.extend(get_leaves(node.right))
+    return result
+
+
+def assign_leaf_indices(node: SlicingNode, counter: list[int] | None = None) -> None:
+    """Yapraklara sıralı index ata."""
+    if counter is None:
+        counter = [0]
+    if node.is_leaf:
+        node.leaf_index = counter[0]
+        counter[0] += 1
+        return
+    if node.left:
+        assign_leaf_indices(node.left, counter)
+    if node.right:
+        assign_leaf_indices(node.right, counter)
+
+
+# ── Genom İşlemleri ──────────────────────────────────────────────────────────
+
+@dataclass
+class SlicingGenome:
+    """GA için slicing tree genomu."""
+    n_rooms: int
+    orientations: list[int]    # 0 veya 1, uzunluk = n_rooms - 1
+    ratios: list[float]        # 0.2-0.8, uzunluk = n_rooms - 1
+    room_order: list[int]      # permütasyon [0..n_rooms-1]
+
+    def to_rects(self, container: Rect) -> list[Rect]:
+        """Genomu dikdörtgen listesine çevir. room_order[i] = i. yapraktaki oda indeksi."""
+        if self.n_rooms == 0:
+            return []
+        if self.n_rooms == 1:
+            return [container]
+
+        tree = build_tree(self.n_rooms, self.orientations, self.ratios)
+        assign_leaf_indices(tree)
+        compute_rects(tree, container)
+
+        leaves = get_leaves(tree)
+        # room_order'a göre sırala: room_order[i] indeksli oda, i. yaprakta
+        rects = [Rect(x=0, y=0, w=0, h=0)] * self.n_rooms
+        for leaf_idx, leaf in enumerate(leaves):
+            if leaf_idx < len(self.room_order) and leaf.rect:
+                room_idx = self.room_order[leaf_idx]
+                rects[room_idx] = leaf.rect
+
+        return rects
+
+
+def random_genome(n_rooms: int) -> SlicingGenome:
+    """Rastgele bir genom üret."""
+    n_cuts = max(0, n_rooms - 1)
+    return SlicingGenome(
+        n_rooms=n_rooms,
+        orientations=[random.randint(0, 1) for _ in range(n_cuts)],
+        ratios=[random.uniform(0.25, 0.75) for _ in range(n_cuts)],
+        room_order=random.sample(range(n_rooms), n_rooms),
+    )
+
+
+def mutate_genome(genome: SlicingGenome, mutation_rate: float = 0.2) -> SlicingGenome:
+    """Genomda küçük değişiklikler yap."""
+    n_cuts = max(0, genome.n_rooms - 1)
+
+    new_orientations = list(genome.orientations)
+    new_ratios = list(genome.ratios)
+    new_order = list(genome.room_order)
+
+    for i in range(n_cuts):
+        if random.random() < mutation_rate:
+            new_orientations[i] = 1 - new_orientations[i]  # flip
+        if random.random() < mutation_rate:
+            new_ratios[i] = max(0.2, min(0.8, new_ratios[i] + random.gauss(0, 0.1)))
+
+    # Oda sırası mutasyonu: iki odayı yer değiştir
+    if random.random() < mutation_rate and len(new_order) >= 2:
+        i, j = random.sample(range(len(new_order)), 2)
+        new_order[i], new_order[j] = new_order[j], new_order[i]
+
+    return SlicingGenome(
+        n_rooms=genome.n_rooms,
+        orientations=new_orientations,
+        ratios=new_ratios,
+        room_order=new_order,
+    )
+
+
+def crossover_genomes(a: SlicingGenome, b: SlicingGenome) -> SlicingGenome:
+    """İki genomu çaprazla."""
+    n_cuts = max(0, a.n_rooms - 1)
+
+    # Tek nokta çaprazlama (orientations + ratios)
+    if n_cuts > 0:
+        cx = random.randint(0, n_cuts - 1)
+        new_o = a.orientations[:cx] + b.orientations[cx:]
+        new_r = a.ratios[:cx] + b.ratios[cx:]
+    else:
+        new_o = []
+        new_r = []
+
+    # Order çaprazlama: Order Crossover (OX)
+    new_order = _order_crossover(a.room_order, b.room_order)
+
+    return SlicingGenome(
+        n_rooms=a.n_rooms,
+        orientations=new_o,
+        ratios=new_r,
+        room_order=new_order,
+    )
+
+
+def _order_crossover(parent_a: list[int], parent_b: list[int]) -> list[int]:
+    """Order Crossover (OX1) for permutations."""
+    n = len(parent_a)
+    if n <= 2:
+        return list(parent_a)
+
+    start = random.randint(0, n - 2)
+    end = random.randint(start + 1, n - 1)
+
+    child = [-1] * n
+    # A'dan bir dilimi kopyala
+    child[start:end + 1] = parent_a[start:end + 1]
+
+    # B'den kalanları sırayla doldur
+    b_remaining = [x for x in parent_b if x not in child]
+    fill_idx = 0
+    for i in range(n):
+        if child[i] == -1:
+            child[i] = b_remaining[fill_idx]
+            fill_idx += 1
+
+    return child
+`,
+          "core/walls.py": `"""
+Adım 8: Duvar kalınlığı, kapı ve pencere yerleşimi.
+Oda sınırları belirlenmiş plan üzerinde:
+- Duvarları çiz
+- Kapıları yerleştir
+- Pencereleri yerleştir
+"""
+
+from __future__ import annotations
+
+from .models import (
+    Rect, RoomType, PlacedRoom, FloorPlan,
+    WallSegment, DoorPlacement, WindowPlacement, Point,
+)
+from .building_codes import BuildingCodes
+from .envelope import get_exterior_walls
+from .corridor import find_neighbors
+
+
+def add_walls_and_openings(plan: FloorPlan, codes: BuildingCodes) -> FloorPlan:
+    """
+    Plana duvar, kapı ve pencere ekle.
+    Yerinde günceller ve geri döndürür.
+    """
+    building_rect = plan.building_rect
+
+    # 1. Duvarları oluştur
+    plan.walls = _generate_walls(plan.rooms, building_rect, codes)
+
+    # 2. Komşuluk grafiği
+    neighbors = find_neighbors(plan.rooms)
+
+    # Oda lookup
+    room_map = {r.room_id: r for r in plan.rooms}
+
+    # 3. Kapıları yerleştir
+    for room in plan.rooms:
+        if room.room_type in (RoomType.MERDIVEN, RoomType.ASANSOR):
+            continue
+
+        room.doors = _place_doors(room, neighbors, room_map, codes)
+
+    # 4. Pencereleri yerleştir
+    for room in plan.rooms:
+        room.windows = _place_windows(room, building_rect, codes)
+
+    return plan
+
+
+def _generate_walls(
+    rooms: list[PlacedRoom],
+    building_rect: Rect,
+    codes: BuildingCodes,
+) -> list[WallSegment]:
+    """Tüm duvar segmentlerini oluştur."""
+    walls: list[WallSegment] = []
+    ow = codes.outer_wall
+    iw = codes.inner_wall
+
+    # Dış duvarlar
+    bx, by = building_rect.x, building_rect.y
+    bx2, by2 = building_rect.x2, building_rect.y2
+
+    # Alt duvar (güney)
+    walls.append(WallSegment(start=Point(x=bx, y=by), end=Point(x=bx2, y=by), thickness=ow, is_exterior=True))
+    # Üst duvar (kuzey)
+    walls.append(WallSegment(start=Point(x=bx, y=by2), end=Point(x=bx2, y=by2), thickness=ow, is_exterior=True))
+    # Sol duvar (batı)
+    walls.append(WallSegment(start=Point(x=bx, y=by), end=Point(x=bx, y=by2), thickness=ow, is_exterior=True))
+    # Sağ duvar (doğu)
+    walls.append(WallSegment(start=Point(x=bx2, y=by), end=Point(x=bx2, y=by2), thickness=ow, is_exterior=True))
+
+    # İç duvarlar: odalar arası paylaşılan kenarlar
+    processed = set()
+    for i, ra in enumerate(rooms):
+        for j, rb in enumerate(rooms):
+            if i >= j:
+                continue
+            key = (min(ra.room_id, rb.room_id), max(ra.room_id, rb.room_id))
+            if key in processed:
+                continue
+
+            shared = ra.rect.shared_edge_length(rb.rect)
+            if shared < 0.1:
+                continue
+
+            processed.add(key)
+
+            # Paylaşılan kenarı bul
+            wall = _find_shared_wall(ra.rect, rb.rect, iw)
+            if wall:
+                walls.append(wall)
+
+    return walls
+
+
+def _find_shared_wall(a: Rect, b: Rect, thickness: float) -> WallSegment | None:
+    """İki dikdörtgen arasındaki paylaşılan duvarı bul."""
+    tol = 0.05
+
+    # Sağ-Sol temas (a'nın sağı b'nin solu)
+    if abs(a.x2 - b.x) < tol:
+        ys = max(a.y, b.y)
+        ye = min(a.y2, b.y2)
+        if ye > ys:
+            return WallSegment(
+                start=Point(x=a.x2, y=ys),
+                end=Point(x=a.x2, y=ye),
+                thickness=thickness,
+            )
+
+    # Sol-Sağ temas
+    if abs(b.x2 - a.x) < tol:
+        ys = max(a.y, b.y)
+        ye = min(a.y2, b.y2)
+        if ye > ys:
+            return WallSegment(
+                start=Point(x=a.x, y=ys),
+                end=Point(x=a.x, y=ye),
+                thickness=thickness,
+            )
+
+    # Üst-Alt temas (a'nın üstü b'nin altı)
+    if abs(a.y2 - b.y) < tol:
+        xs = max(a.x, b.x)
+        xe = min(a.x2, b.x2)
+        if xe > xs:
+            return WallSegment(
+                start=Point(x=xs, y=a.y2),
+                end=Point(x=xe, y=a.y2),
+                thickness=thickness,
+            )
+
+    # Alt-Üst temas
+    if abs(b.y2 - a.y) < tol:
+        xs = max(a.x, b.x)
+        xe = min(a.x2, b.x2)
+        if xe > xs:
+            return WallSegment(
+                start=Point(x=xs, y=a.y),
+                end=Point(x=xe, y=a.y),
+                thickness=thickness,
+            )
+
+    return None
+
+
+def _place_doors(
+    room: PlacedRoom,
+    neighbors: dict[str, list[str]],
+    room_map: dict[str, PlacedRoom],
+    codes: BuildingCodes,
+) -> list[DoorPlacement]:
+    """Odaya kapı yerleştir. En az 1 kapı, koridora veya komşuya açılır."""
+    doors: list[DoorPlacement] = []
+    door_width = codes.door_width(room.room_type)
+    room_neighbors = neighbors.get(room.room_id, [])
+
+    if not room_neighbors:
+        return doors
+
+    # Öncelik: koridora açılsın, yoksa en büyük komşuya
+    best_neighbor = None
+    best_shared = 0.0
+
+    for nid in room_neighbors:
+        neighbor = room_map.get(nid)
+        if not neighbor:
+            continue
+
+        shared = room.rect.shared_edge_length(neighbor.rect)
+
+        # Koridor tercih edilir
+        is_corridor = neighbor.room_type == RoomType.KORIDOR
+        priority = shared + (10.0 if is_corridor else 0.0)
+
+        if priority > best_shared:
+            best_shared = priority
+            best_neighbor = neighbor
+
+    if best_neighbor:
+        door = _create_door_on_shared_wall(room, best_neighbor, door_width)
+        if door:
+            door.connects_to = best_neighbor.room_id
+            doors.append(door)
+
+    return doors
+
+
+def _create_door_on_shared_wall(
+    room: PlacedRoom,
+    neighbor: PlacedRoom,
+    door_width: float,
+) -> DoorPlacement | None:
+    """Paylaşılan duvarda kapı oluştur."""
+    tol = 0.05
+    a = room.rect
+    b = neighbor.rect
+    margin = 0.30  # Köşeden min mesafe
+
+    # Sağ kenar
+    if abs(a.x2 - b.x) < tol or abs(b.x2 - a.x) < tol:
+        ys = max(a.y, b.y) + margin
+        ye = min(a.y2, b.y2) - margin
+        if ye - ys >= door_width:
+            pos = (ys + ye) / 2
+            side = "east" if abs(a.x2 - b.x) < tol else "west"
+            return DoorPlacement(wall_side=side, position=pos, width=door_width)
+
+    # Üst/Alt kenar
+    if abs(a.y2 - b.y) < tol or abs(b.y2 - a.y) < tol:
+        xs = max(a.x, b.x) + margin
+        xe = min(a.x2, b.x2) - margin
+        if xe - xs >= door_width:
+            pos = (xs + xe) / 2
+            side = "north" if abs(a.y2 - b.y) < tol else "south"
+            return DoorPlacement(wall_side=side, position=pos, width=door_width)
+
+    return None
+
+
+def _place_windows(
+    room: PlacedRoom,
+    building_rect: Rect,
+    codes: BuildingCodes,
+) -> list[WindowPlacement]:
+    """Dış duvardaki odalara pencere yerleştir."""
+    if not codes.needs_window(room.room_type):
+        return []
+
+    windows: list[WindowPlacement] = []
+    exterior_sides = get_exterior_walls(room.rect, building_rect)
+
+    if not exterior_sides:
+        return []
+
+    # İlk dış duvara pencere koy
+    side = exterior_sides[0]
+    win_height = codes.window_standard_height
+    min_win_w = codes.window_min_width
+
+    # Pencere genişliği: oda alanının %10'u / pencere yüksekliği, min 0.6m
+    required_area = room.area * codes.window_min_area_ratio
+    win_w = max(min_win_w, required_area / win_height)
+
+    # Duvar genişliğine göre sınırla
+    if side in ("north", "south"):
+        max_w = room.rect.w - 0.6  # Kenarlarda 30cm boşluk
+        pos = room.rect.cx
+    else:
+        max_w = room.rect.h - 0.6
+        pos = room.rect.cy
+
+    win_w = min(win_w, max(min_win_w, max_w))
+
+    windows.append(WindowPlacement(
+        wall_side=side,
+        position=pos,
+        width=win_w,
+        height=win_height,
+    ))
+
+    # Balkon: ek pencere (kapı görevi de görür)
+    if len(exterior_sides) > 1 and room.room_type == RoomType.SALON:
+        side2 = exterior_sides[1]
+        windows.append(WindowPlacement(
+            wall_side=side2,
+            position=room.rect.cx if side2 in ("north", "south") else room.rect.cy,
+            width=min_win_w,
+            height=win_height,
+        ))
+
+    return windows
+`,
+          "core/core_placer.py": `"""
+Adım 4: Merdiven ve asansör çekirdek elemanlarını yerleştir.
+Çekirdek elemanlar sabit pozisyona yerleştirilir, kalan alan slicing tree'ye verilir.
+"""
+
+from __future__ import annotations
+
+from .models import Rect, RoomType, PlacedRoom
+from .building_codes import BuildingCodes
+
+
+class CorePlacement:
+    """Çekirdek (merdiven + asansör) yerleştirme sonucu."""
+
+    def __init__(
+        self,
+        stairs_rect: Rect | None,
+        elevator_rect: Rect | None,
+        remaining_rects: list[Rect],
+    ):
+        self.stairs_rect = stairs_rect
+        self.elevator_rect = elevator_rect
+        self.remaining_rects = remaining_rects  # Kalan alanlar (slicing tree için)
+
+    def to_placed_rooms(self) -> list[PlacedRoom]:
+        rooms = []
+        if self.stairs_rect:
+            rooms.append(PlacedRoom(
+                room_type=RoomType.MERDIVEN,
+                room_id="merdiven_0",
+                rect=self.stairs_rect,
+            ))
+        if self.elevator_rect:
+            rooms.append(PlacedRoom(
+                room_type=RoomType.ASANSOR,
+                room_id="asansor_0",
+                rect=self.elevator_rect,
+            ))
+        return rooms
+
+
+def place_core(
+    inner_rect: Rect,
+    codes: BuildingCodes,
+    has_elevator: bool = False,
+    position: str = "center_left",
+) -> CorePlacement:
+    """
+    Çekirdek elemanları yerleştir ve kalan alanı döndür.
+    
+    Pozisyon seçenekleri:
+      - "center_left": sol ortada (varsayılan)
+      - "center_right": sağ ortada
+      - "top_center": üst ortada
+      - "bottom_center": alt ortada
+    
+    Merdiven + asansör yan yana yerleştirilir.
+    Kalan alan: çekirdeğin solunda ve sağında (veya üstünde/altında) iki bölge.
+    Eğer çekirdek yoksa, inner_rect'in tamamı döner.
+    """
+    stairs_w = codes.stairs_width
+    stairs_l = codes.stairs_length
+
+    # Çekirdek toplam boyutu
+    core_w = stairs_w
+    core_l = stairs_l
+
+    if has_elevator:
+        elev_w = codes.elevator_width
+        elev_l = codes.elevator_length
+        # Asansör merdivenin yanına
+        core_w = stairs_w + elev_w + codes.inner_wall
+    else:
+        elev_w = 0
+        elev_l = 0
+
+    # Çekirdek yoksa (nadir ama olabilir)
+    need_stairs = True  # Merdiven her zaman var
+
+    if not need_stairs:
+        return CorePlacement(None, None, [inner_rect])
+
+    # Pozisyona göre çekirdeği yerleştir
+    if position == "center_left":
+        core_x = inner_rect.x
+        core_y = inner_rect.cy - core_l / 2
+    elif position == "center_right":
+        core_x = inner_rect.x2 - core_w
+        core_y = inner_rect.cy - core_l / 2
+    elif position == "top_center":
+        core_x = inner_rect.cx - core_w / 2
+        core_y = inner_rect.y2 - core_l
+    elif position == "bottom_center":
+        core_x = inner_rect.cx - core_w / 2
+        core_y = inner_rect.y
+    else:
+        core_x = inner_rect.x
+        core_y = inner_rect.cy - core_l / 2
+
+    # Sınır kontrolü
+    core_y = max(inner_rect.y, min(core_y, inner_rect.y2 - core_l))
+    core_x = max(inner_rect.x, min(core_x, inner_rect.x2 - core_w))
+
+    # Merdiven rect
+    stairs_rect = Rect(x=core_x, y=core_y, w=stairs_w, h=stairs_l)
+
+    # Asansör rect (merdivenin sağında)
+    elevator_rect = None
+    if has_elevator:
+        elevator_rect = Rect(
+            x=core_x + stairs_w + codes.inner_wall,
+            y=core_y,
+            w=elev_w,
+            h=max(elev_l, stairs_l),
+        )
+
+    # Kalan alanları hesapla
+    remaining = _compute_remaining_area(inner_rect, core_x, core_y, core_w, core_l)
+
+    return CorePlacement(stairs_rect, elevator_rect, remaining)
+
+
+def _compute_remaining_area(
+    container: Rect,
+    core_x: float,
+    core_y: float,
+    core_w: float,
+    core_h: float,
+) -> list[Rect]:
+    """
+    Çekirdeği çıkardıktan sonra kalan alanları L-şeklinde veya
+    tek büyük dikdörtgen olarak döndür.
+    
+    Strateji: Çekirdeğin konumuna göre en büyük dikdörtgeni seç.
+    Basit yaklaşım: çekirdeği tam bir şerit olarak kesip, kalan alanı döndür.
+    """
+    # Çekirdeği dikey şerit olarak kes
+    # Sol kalan
+    left_w = core_x - container.x
+    # Sağ kalan
+    right_x = core_x + core_w
+    right_w = container.x2 - right_x
+    # Üst kalan (çekirdeğin üstü, çekirdek genişliğinde)
+    top_y = core_y + core_h
+    top_h = container.y2 - top_y
+    # Alt kalan (çekirdeğin altı)
+    bottom_h = core_y - container.y
+
+    rects = []
+
+    # Ana büyük alan: çekirdeğin sağındaki tüm alan
+    if right_w > 1.0:
+        rects.append(Rect(x=right_x, y=container.y, w=right_w, h=container.h))
+
+    # Çekirdeğin üstündeki alan (sol şerit üstü)
+    if top_h > 1.0 and left_w > 0.5:
+        rects.append(Rect(x=container.x, y=top_y, w=core_w + (0 if rects else right_w), h=top_h))
+
+    # Çekirdeğin altındaki alan (sol şerit altı)
+    if bottom_h > 1.0 and left_w > 0.5:
+        rects.append(Rect(x=container.x, y=container.y, w=core_w + (0 if rects else right_w), h=bottom_h))
+
+    # Eğer hiçbir anlamlı alan yoksa, tüm alanı döndür (çekirdek sığmamış)
+    if not rects:
+        rects.append(container)
+
+    # En büyük dikdörtgeni ilk sıraya koy (ana oda alanı olarak)
+    rects.sort(key=lambda r: r.area, reverse=True)
+
+    return rects
+
+
+# Çekirdek pozisyon seçenekleri (GA için)
+CORE_POSITIONS = ["center_left", "center_right", "top_center", "bottom_center"]
+`,
+          "core/validator.py": `"""
+Adım 9: Plan doğrulama motoru.
+Üretilen planları tüm kısıtlara karşı kontrol eder.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+
+from .models import Rect, RoomType, PlacedRoom, FloorPlan
+from .building_codes import BuildingCodes
+from .corridor import check_connectivity, find_neighbors
+
+
+@dataclass
+class ValidationResult:
+    """Doğrulama sonucu."""
+    is_valid: bool = True
+    errors: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+
+    def add_error(self, msg: str) -> None:
+        self.errors.append(msg)
+        self.is_valid = False
+
+    def add_warning(self, msg: str) -> None:
+        self.warnings.append(msg)
+
+
+def validate_plan(plan: FloorPlan, codes: BuildingCodes) -> ValidationResult:
+    """Planı tüm kurallara karşı doğrula."""
+    result = ValidationResult()
+
+    _check_overlaps(plan, result)
+    _check_bounds(plan, result)
+    _check_min_areas(plan, codes, result)
+    _check_min_widths(plan, codes, result)
+    _check_connectivity(plan, result)
+    _check_exterior_access(plan, codes, result)
+
+    return result
+
+
+def _check_overlaps(plan: FloorPlan, result: ValidationResult) -> None:
+    """Oda çakışması kontrolü."""
+    rooms = plan.rooms
+    for i in range(len(rooms)):
+        for j in range(i + 1, len(rooms)):
+            ri, rj = rooms[i], rooms[j]
+            if ri.rect.overlaps(rj.rect):
+                # Komşu kenar teması OK, gerçek çakışma değil
+                # Küçük çakışmaları (< 0.01 m²) tolere et
+                ix1 = max(ri.rect.x, rj.rect.x)
+                iy1 = max(ri.rect.y, rj.rect.y)
+                ix2 = min(ri.rect.x2, rj.rect.x2)
+                iy2 = min(ri.rect.y2, rj.rect.y2)
+                overlap_area = max(0, ix2 - ix1) * max(0, iy2 - iy1)
+                if overlap_area > 0.05:
+                    result.add_error(
+                        f"Çakışma: {ri.room_id} ve {rj.room_id} "
+                        f"({overlap_area:.2f} m² çakışma)"
+                    )
+
+
+def _check_bounds(plan: FloorPlan, result: ValidationResult) -> None:
+    """Tüm odalar bina sınırı içinde mi?"""
+    br = plan.building_rect
+    for room in plan.rooms:
+        r = room.rect
+        if r.x < br.x - 0.01 or r.y < br.y - 0.01:
+            result.add_error(f"{room.room_id} bina sınırı dışında (sol/alt)")
+        if r.x2 > br.x2 + 0.01 or r.y2 > br.y2 + 0.01:
+            result.add_error(f"{room.room_id} bina sınırı dışında (sağ/üst)")
+
+
+def _check_min_areas(plan: FloorPlan, codes: BuildingCodes, result: ValidationResult) -> None:
+    """Minimum alan kontrolü."""
+    for room in plan.rooms:
+        if room.room_type in (RoomType.KORIDOR_DAIRE, RoomType.KORIDOR_BINA, RoomType.MERDIVEN, RoomType.ASANSOR):
+            continue
+        min_a = codes.min_area(room.room_type)
+        if min_a > 0 and room.area < min_a * 0.85:  # %15 tolerans
+            result.add_warning(
+                f"{room.room_id}: alan {room.area:.1f} m² < min {min_a:.1f} m²"
+            )
+
+
+def _check_min_widths(plan: FloorPlan, codes: BuildingCodes, result: ValidationResult) -> None:
+    """Minimum genişlik kontrolü."""
+    for room in plan.rooms:
+        if room.room_type in (RoomType.KORIDOR_DAIRE, RoomType.KORIDOR_BINA, RoomType.MERDIVEN, RoomType.ASANSOR):
+            continue
+        min_w = codes.min_width(room.room_type)
+        if min_w > 0 and room.rect.min_dim < min_w * 0.85:
+            result.add_warning(
+                f"{room.room_id}: min genişlik {room.rect.min_dim:.2f}m < {min_w:.2f}m"
+            )
+
+
+def _check_connectivity(plan: FloorPlan, result: ValidationResult) -> None:
+    """Her oda en az bir komşuya bağlı mı?"""
+    connectivity = check_connectivity(plan.rooms)
+    for room_id, connected in connectivity.items():
+        if not connected:
+            result.add_warning(f"{room_id}: hiçbir odaya bağlantısı yok")
+
+
+def _check_exterior_access(
+    plan: FloorPlan, codes: BuildingCodes, result: ValidationResult
+) -> None:
+    """Dış duvar gerektiren odalar gerçekten dış duvarda mı?"""
+    for room in plan.rooms:
+        if codes.needs_exterior_wall(room.room_type):
+            touches = room.rect.touches_edge(plan.building_rect, tolerance=0.05)
+            if not any(touches.values()):
+                result.add_warning(
+                    f"{room.room_id} ({room.room_type.value}): dış duvara erişimi yok"
+                )
+`,
+          "core/room_defaults.py": `"""
+Oda tiplerine göre varsayılan davranışlar ve alan hesaplamaları.
+Kullanıcı oda alanı GİRMEZ - bu modül toplam alana göre oda alanlarını dağıtır.
+"""
+
+from __future__ import annotations
+
+from .models import RoomType, Rect
+from .building_codes import BuildingCodes
+
+
+def compute_room_target_areas(
+    room_types: list[RoomType],
+    available_area: float,
+    codes: BuildingCodes,
+) -> list[float]:
+    """
+    Oda listesi ve toplam kullanılabilir alana göre her odanın hedef alanını hesapla.
+    
+    Strateji:
+    1. Her oda tipinin minimum alanını al
+    2. Kalan alanı preferred_area_ratio'ya göre dağıt
+    3. Hiçbir oda minimum alanın altına düşmez
+    """
+    n = len(room_types)
+    if n == 0:
+        return []
+
+    # 1. Minimum alanları topla
+    min_areas = [codes.min_area(rt) for rt in room_types]
+    total_min = sum(min_areas)
+
+    if total_min >= available_area:
+        # Alan yetmiyorsa minimum alanları orantılı küçült
+        scale = available_area / total_min * 0.95  # %5 koridor payı
+        return [ma * scale for ma in min_areas]
+
+    # 2. Kalan alanı orantılı dağıt
+    remaining = available_area - total_min
+    ratios = [codes.preferred_area_ratio(rt) for rt in room_types]
+    total_ratio = sum(ratios) or 1.0
+
+    targets = []
+    for i, rt in enumerate(room_types):
+        bonus = remaining * (ratios[i] / total_ratio)
+        targets.append(min_areas[i] + bonus)
+
+    return targets
+
+
+def get_room_priority(room_type: RoomType) -> int:
+    """
+    Oda yerleştirme önceliği (düşük = önce yerleştirilir).
+    Büyük ve dış duvar gerektiren odalar önce.
+    """
+    priority_map = {
+        RoomType.SALON: 1,
+        RoomType.MUTFAK: 2,
+        RoomType.YATAK_ODASI: 3,
+        RoomType.ODA: 4,
+        RoomType.BANYO: 5,
+        RoomType.BANYO: 6,
+        RoomType.TUVALET: 7,
+        RoomType.ANTRE: 8,
+        RoomType.KORIDOR_DAIRE: 9,
+    }
+    return priority_map.get(room_type, 10)
+
+
+def make_room_id(room_type: RoomType, index: int) -> str:
+    """Benzersiz oda ID'si: 'yatak_odasi_0', 'salon_0'."""
+    return f"{room_type.value}_{index}"
+
+
+def assign_room_ids(room_types: list[RoomType]) -> list[str]:
+    """Oda listesine benzersiz ID'ler ata."""
+    counts: dict[RoomType, int] = {}
+    ids = []
+    for rt in room_types:
+        idx = counts.get(rt, 0)
+        ids.append(make_room_id(rt, idx))
+        counts[rt] = idx + 1
+    return ids
+`,
+          "core/corridor.py": `"""
+Adım 7: Koridor üretimi ve oda erişim bağlantıları.
+MVP'de basit yaklaşım: koridor odası zaten slicing tree'de var,
+ek olarak erişilebilirlik kontrolü yapar.
+"""
+
+from __future__ import annotations
+
+from .models import Rect, RoomType, PlacedRoom
+from .building_codes import BuildingCodes
+
+
+def check_connectivity(rooms: list[PlacedRoom], tolerance: float = 0.05) -> dict[str, bool]:
+    """
+    Her odanın en az bir komşuya (koridor dahil) bağlı olup olmadığını kontrol et.
+    Bağlantı = paylaşılan kenar uzunluğu > kapı genişliği.
+    """
+    result: dict[str, bool] = {}
+
+    for room in rooms:
+        if room.room_type in (RoomType.MERDIVEN, RoomType.ASANSOR):
+            result[room.room_id] = True
+            continue
+
+        connected = False
+        for other in rooms:
+            if other.room_id == room.room_id:
+                continue
+            shared = room.rect.shared_edge_length(other.rect, tolerance)
+            if shared >= 0.7:  # En az kapı genişliği kadar paylaşılan kenar
+                connected = True
+                break
+
+        result[room.room_id] = connected
+
+    return result
+
+
+def find_neighbors(rooms: list[PlacedRoom], tolerance: float = 0.05) -> dict[str, list[str]]:
+    """Her oda için komşu odaların listesi."""
+    neighbors: dict[str, list[str]] = {r.room_id: [] for r in rooms}
+
+    for i, room_a in enumerate(rooms):
+        for j, room_b in enumerate(rooms):
+            if i >= j:
+                continue
+            shared = room_a.rect.shared_edge_length(room_b.rect, tolerance)
+            if shared >= 0.3:  # Minimum temas
+                neighbors[room_a.room_id].append(room_b.room_id)
+                neighbors[room_b.room_id].append(room_a.room_id)
+
+    return neighbors
+
+
+def compute_corridor_quality(rooms: list[PlacedRoom]) -> float:
+    """
+    Koridor kalitesi skoru (0-1).
+    - Tüm odalar bağlı mı?
+    - Koridorun en/boy oranı uygun mu?
+    """
+    connectivity = check_connectivity(rooms)
+    connected_count = sum(1 for v in connectivity.values() if v)
+    total = len(connectivity)
+
+    if total == 0:
+        return 1.0
+
+    connectivity_score = connected_count / total
+
+    # Koridor odalarının en/boy oranı
+    corridor_rooms = [r for r in rooms if r.room_type in (RoomType.KORIDOR_DAIRE, RoomType.KORIDOR_BINA)]
+    ratio_score = 1.0
+    for cr in corridor_rooms:
+        aspect = cr.rect.max_dim / cr.rect.min_dim if cr.rect.min_dim > 0 else 999
+        if aspect > 6:
+            ratio_score *= 0.7  # Çok uzun ve dar koridor
+        elif aspect > 4:
+            ratio_score *= 0.9
+
+    return connectivity_score * 0.8 + ratio_score * 0.2
+`,
+          "core/envelope.py": `"""
+Adım 2: Bina zarfı işlemleri.
+Dikdörtgen bina sınırı oluşturma, net alan hesaplama, yön bilgisi.
+"""
+
+from __future__ import annotations
+
+from .models import BuildingInput, CompassDirection, Rect
+from .building_codes import BuildingCodes
+
+
+def create_building_rect(building: BuildingInput) -> Rect:
+    """Bina dış sınırı dikdörtgeni oluştur. Orijin (0,0) sol-alt köşe."""
+    return Rect(x=0, y=0, w=building.width, h=building.height)
+
+
+def create_inner_rect(building_rect: Rect, codes: BuildingCodes) -> Rect:
+    """Dış duvar kalınlığını çıkararak iç (net) alanı hesapla."""
+    t = codes.outer_wall
+    return Rect(
+        x=building_rect.x + t,
+        y=building_rect.y + t,
+        w=building_rect.w - 2 * t,
+        h=building_rect.h - 2 * t,
+    )
+
+
+def get_compass_edges(building_rect: Rect, north_facing: CompassDirection) -> dict[str, str]:
+    """
+    Dikdörtgenin kenarlarını pusula yönlerine eşle.
+    
+    building_rect kenarları: "top", "bottom", "left", "right"
+    Dönüş: {"north": "top", "south": "bottom", "east": "right", "west": "left"}
+    (north_facing=NORTH varsayılan durumda)
+    """
+    # "top" kenarı north_facing yönüne bakıyor
+    # Saat yönünde: top -> right -> bottom -> left
+    edges = ["top", "right", "bottom", "left"]
+    compass = ["north", "east", "south", "west"]
+
+    # north_facing'e göre top kenarını eşle
+    offset_map = {
+        CompassDirection.NORTH: 0,  # top = north
+        CompassDirection.EAST: 1,   # top = east  (bina 90° sola döndürülmüş)
+        CompassDirection.SOUTH: 2,  # top = south (bina 180° döndürülmüş)
+        CompassDirection.WEST: 3,   # top = west  (bina 90° sağa döndürülmüş)
+    }
+    offset = offset_map[north_facing]
+
+    result = {}
+    for i, direction in enumerate(compass):
+        edge_idx = (i + offset) % 4
+        result[direction] = edges[edge_idx]
+
+    return result
+
+
+def edge_to_wall_side(edge: str) -> str:
+    """Kenar adını rect wall_side'a çevir."""
+    mapping = {"top": "north", "bottom": "south", "left": "west", "right": "east"}
+    return mapping.get(edge, edge)
+
+
+def get_exterior_walls(room_rect: Rect, building_rect: Rect, tolerance: float = 0.01) -> list[str]:
+    """Odanın hangi dış duvarlara değdiğini döndür."""
+    touches = room_rect.touches_edge(building_rect, tolerance)
+    return [side for side, val in touches.items() if val]
+`,
+          "export/__init__.py": ``,
+          "export/svg_renderer.py": `"""
+Mimari kalitede plan çizimi - v2.
+Referans görsele uygun: kalın duvarlar, yay kapılar, şematik mobilya.
+"""
+
+from __future__ import annotations
+
+import io
+import math
+
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import matplotlib.patches as patches
+from matplotlib.patches import Arc, FancyBboxPatch, Circle
+from matplotlib.figure import Figure
+import numpy as np
+
+from core.models import FloorPlan, PlacedRoom, RoomType, ROOM_DISPLAY_NAMES
+from core.furniture import get_room_furniture, FurnitureItem
+
+
+# ── Renk paleti (referans görsele uygun) ──────────────────────────────────────
+
+ROOM_FILLS = {
+    RoomType.SALON: "#FFFFFF",
+    RoomType.YATAK_ODASI: "#FFFFFF",
+    RoomType.ODA: "#FFFFFF",
+    RoomType.MUTFAK: "#FFFFFF",
+    RoomType.BANYO: "#E8EFF5",       # açık mavi (ıslak alan)
+    RoomType.TUVALET: "#E8EFF5",
+    RoomType.ANTRE: "#F5F5F5",
+    RoomType.KORIDOR_DAIRE: "#F0F0F0",
+    RoomType.KORIDOR_BINA: "#EDEDED",
+    RoomType.MERDIVEN: "#E0E0E0",
+    RoomType.ASANSOR: "#D8D8D8",
+}
+
+WALL_COLOR = "#333333"
+OUTER_WALL_COLOR = "#222222"
+FURNITURE_COLOR = "#666666"
+FURNITURE_FILL = "#F8F8F8"
+DOOR_COLOR = "#444444"
+WINDOW_COLOR = "#4488CC"
+LABEL_COLOR = "#333333"
+
+
+def render_plan(
+    plan: FloorPlan,
+    figsize: tuple[float, float] = (14, 10),
+    title: str | None = None,
+) -> Figure:
+    """FloorPlan'ı mimari kalitede matplotlib Figure olarak çiz."""
+    fig, ax = plt.subplots(1, 1, figsize=figsize)
+    br = plan.building_rect
+    ow = 0.25  # dış duvar kalınlığı
+
+    # Arka plan
+    ax.set_facecolor("white")
+
+    # 1. Dış duvarlar (kalın, koyu)
+    _draw_thick_walls_outer(ax, br, ow)
+
+    # 2. Odaları çiz (zemin rengi + ince çerçeve)
+    for room in plan.rooms:
+        fill = ROOM_FILLS.get(room.room_type, "#FFFFFF")
+        room_patch = patches.Rectangle(
+            (room.rect.x, room.rect.y), room.rect.w, room.rect.h,
+            linewidth=0.8, edgecolor=WALL_COLOR, facecolor=fill, zorder=1,
+        )
+        ax.add_patch(room_patch)
+
+    # 3. İç duvarlar (kalın çizgiler)
+    _draw_inner_walls(ax, plan)
+
+    # 4. Kapılar (yay gösterimi)
+    for room in plan.rooms:
+        for door in room.doors:
+            _draw_door_arc(ax, room, door)
+
+    # 5. Pencereler
+    for room in plan.rooms:
+        for window in room.windows:
+            _draw_window(ax, room, window)
+
+    # 6. Mobilyalar
+    for room in plan.rooms:
+        if room.room_type in (RoomType.KORIDOR_DAIRE, RoomType.KORIDOR_BINA,
+                               RoomType.MERDIVEN, RoomType.ASANSOR, RoomType.ANTRE):
+            if room.room_type == RoomType.MERDIVEN:
+                _draw_stairs_symbol(ax, room.rect)
+            elif room.room_type == RoomType.ASANSOR:
+                _draw_elevator_symbol(ax, room.rect)
+            continue
+
+        furniture = get_room_furniture(room.room_type, room.rect.w, room.rect.h)
+        for item in furniture:
+            _draw_furniture(ax, room.rect, item)
+
+    # 7. Etiketler
+    for room in plan.rooms:
+        _draw_label(ax, room)
+
+    # 8. Giriş oku (bina koridoruna)
+    _draw_entry_arrow(ax, plan)
+
+    # 9. Ölçü bilgileri
+    ax.text(br.cx, br.y - 1.2, f"{br.w:.1f} m",
+            ha="center", fontsize=11, color="#444")
+    ax.text(br.x - 1.2, br.cy, f"{br.h:.1f} m",
+            ha="center", fontsize=11, color="#444", rotation=90)
+
+    # Eksen ayarları
+    margin = 2.0
+    ax.set_xlim(br.x - margin, br.x2 + margin)
+    ax.set_ylim(br.y - margin, br.y2 + margin)
+    ax.set_aspect("equal")
+    ax.axis("off")
+
+    if title:
+        ax.set_title(title, fontsize=14, fontweight="bold", pad=15)
+    else:
+        score_pct = plan.fitness_score * 100
+        ax.set_title(f"{plan.plan_id}  (Skor: {score_pct:.0f}%)", fontsize=13, pad=12)
+
+    fig.tight_layout()
+    return fig
+
+
+def render_plan_to_bytes(plan: FloorPlan, fmt: str = "png", **kwargs) -> bytes:
+    fig = render_plan(plan, **kwargs)
+    buf = io.BytesIO()
+    fig.savefig(buf, format=fmt, dpi=150, bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+    buf.seek(0)
+    return buf.getvalue()
+
+
+# ── Duvarlar ──────────────────────────────────────────────────────────────────
+
+def _draw_thick_walls_outer(ax, br, thickness: float):
+    """Dış duvarları kalın dolgulu dikdörtgenler olarak çiz."""
+    bx, by, bw, bh = br.x, br.y, br.w, br.h
+    t = thickness
+
+    # Alt duvar
+    ax.add_patch(patches.Rectangle((bx, by), bw, t, fc=OUTER_WALL_COLOR, ec="none"))
+    # Üst duvar
+    ax.add_patch(patches.Rectangle((bx, by + bh - t), bw, t, fc=OUTER_WALL_COLOR, ec="none"))
+    # Sol duvar
+    ax.add_patch(patches.Rectangle((bx, by), t, bh, fc=OUTER_WALL_COLOR, ec="none"))
+    # Sağ duvar
+    ax.add_patch(patches.Rectangle((bx + bw - t, by), t, bh, fc=OUTER_WALL_COLOR, ec="none"))
+
+
+def _draw_inner_walls(ax, plan: FloorPlan):
+    """
+    İç duvarları kalın dolgulu dikdörtgenler olarak çiz.
+    Gap-aware: odalar arası iw boşluğunu da duvar olarak çizer.
+    Daireler arası duvarlar daha kalın (taşıyıcı duvar).
+    """
+    drawn = set()
+    rooms = plan.rooms
+    br = plan.building_rect
+    ow = 0.25  # dış duvar kalınlığı
+    iw = 0.15  # iç duvar kalınlığı
+    cw = 0.20  # taşıyıcı duvar (daireler arası / ortak alan sınırı)
+    gap_tol = iw + 0.12  # Odalar arası bu mesafede ise duvar çiz
+
+    for i, ra in enumerate(rooms):
+        for j, rb in enumerate(rooms):
+            if i >= j:
+                continue
+            key = (min(ra.room_id, rb.room_id), max(ra.room_id, rb.room_id))
+            if key in drawn:
+                continue
+
+            a, b = ra.rect, rb.rect
+
+            # Duvar kalınlığı: farklı daireler arası daha kalın
+            diff_apt = (ra.apartment_id != rb.apartment_id
+                        and ra.apartment_id >= 0 and rb.apartment_id >= 0)
+            common_boundary = (ra.apartment_id == -1) != (rb.apartment_id == -1)
+            thickness = cw if (diff_apt or common_boundary) else iw
+
+            # --- Dikey duvar (odalar yan yana, x yönünde bitişik) ---
+
+            # a'nın sağ kenarı ~ b'nin sol kenarı
+            dx1 = b.x - a.x2
+            if -0.05 <= dx1 < gap_tol:
+                ys, ye = max(a.y, b.y), min(a.y2, b.y2)
+                if ye - ys > 0.1:
+                    cx = (a.x2 + b.x) / 2
+                    drawn.add(key)
+                    ax.add_patch(patches.Rectangle(
+                        (cx - thickness / 2, ys), thickness, ye - ys,
+                        fc=WALL_COLOR, ec="none", zorder=2,
+                    ))
+                    continue
+
+            # b'nin sağ kenarı ~ a'nın sol kenarı
+            dx2 = a.x - b.x2
+            if -0.05 <= dx2 < gap_tol:
+                ys, ye = max(a.y, b.y), min(a.y2, b.y2)
+                if ye - ys > 0.1:
+                    cx = (b.x2 + a.x) / 2
+                    drawn.add(key)
+                    ax.add_patch(patches.Rectangle(
+                        (cx - thickness / 2, ys), thickness, ye - ys,
+                        fc=WALL_COLOR, ec="none", zorder=2,
+                    ))
+                    continue
+
+            # --- Yatay duvar (odalar üst üste, y yönünde bitişik) ---
+
+            # a'nın üst kenarı ~ b'nin alt kenarı
+            dy1 = b.y - a.y2
+            if -0.05 <= dy1 < gap_tol:
+                xs, xe = max(a.x, b.x), min(a.x2, b.x2)
+                if xe - xs > 0.1:
+                    cy = (a.y2 + b.y) / 2
+                    drawn.add(key)
+                    ax.add_patch(patches.Rectangle(
+                        (xs, cy - thickness / 2), xe - xs, thickness,
+                        fc=WALL_COLOR, ec="none", zorder=2,
+                    ))
+                    continue
+
+            # b'nin üst kenarı ~ a'nın alt kenarı
+            dy2 = a.y - b.y2
+            if -0.05 <= dy2 < gap_tol:
+                xs, xe = max(a.x, b.x), min(a.x2, b.x2)
+                if xe - xs > 0.1:
+                    cy = (b.y2 + a.y) / 2
+                    drawn.add(key)
+                    ax.add_patch(patches.Rectangle(
+                        (xs, cy - thickness / 2), xe - xs, thickness,
+                        fc=WALL_COLOR, ec="none", zorder=2,
+                    ))
+
+    # Oda kenar duvarları: bina iç sınırına değmeyen kenarlarda duvar çiz
+    _draw_room_edge_walls(ax, rooms, br, ow, iw)
+
+
+def _draw_room_edge_walls(ax, rooms, br, ow, iw):
+    """
+    Her odanın bina dış duvarına değmeyen kenarlarında duvar çiz.
+    Bu, bitişik olmayan (komşu bulunamayan) kenarlar için yedek güvence sağlar.
+    """
+    tol = ow + 0.15  # Dış duvar + tolerans
+
+    for room in rooms:
+        r = room.rect
+        if r.w < 0.3 or r.h < 0.3:
+            continue
+
+        # Her kenarın bina dış sınırına yakınlığını kontrol et
+        near_south = (r.y - br.y) < tol
+        near_north = (br.y2 - r.y2) < tol
+        near_west = (r.x - br.x) < tol
+        near_east = (br.x2 - r.x2) < tol
+
+        # Güney kenar
+        if not near_south:
+            ax.add_patch(patches.Rectangle(
+                (r.x, r.y - iw / 2), r.w, iw,
+                fc=WALL_COLOR, ec="none", zorder=2, alpha=0.7,
+            ))
+        # Kuzey kenar
+        if not near_north:
+            ax.add_patch(patches.Rectangle(
+                (r.x, r.y2 - iw / 2), r.w, iw,
+                fc=WALL_COLOR, ec="none", zorder=2, alpha=0.7,
+            ))
+        # Batı kenar
+        if not near_west:
+            ax.add_patch(patches.Rectangle(
+                (r.x - iw / 2, r.y), iw, r.h,
+                fc=WALL_COLOR, ec="none", zorder=2, alpha=0.7,
+            ))
+        # Doğu kenar
+        if not near_east:
+            ax.add_patch(patches.Rectangle(
+                (r.x2 - iw / 2, r.y), iw, r.h,
+                fc=WALL_COLOR, ec="none", zorder=2, alpha=0.7,
+            ))
+
+
+# ── Kapılar (Yay gösterimi) ──────────────────────────────────────────────────
+
+def _draw_door_arc(ax, room: PlacedRoom, door):
+    """
+    Kapıyı mimari standartta çiz: çeyrek daire yay + kapı yaprağı çizgisi.
+    Referans görseldeki gibi açılma yönü gösterilir.
+    """
+    r = room.rect
+    dw = door.width
+    hw = dw / 2
+
+    if door.wall_side == "east":
+        # Kapı doğu duvarında, odanın içine açılır
+        cx = r.x2
+        cy = door.position
+        # Duvar üzerinde boşluk (beyaz)
+        ax.plot([cx, cx], [cy - hw, cy + hw], color="white", linewidth=4, zorder=5)
+        # Kapı yaprağı (çizgi)
+        ax.plot([cx, cx - dw], [cy - hw, cy - hw], color=DOOR_COLOR, linewidth=1.2, zorder=6)
+        # Yay
+        arc = Arc((cx, cy - hw), dw * 2, dw * 2, angle=0, theta1=90, theta2=180,
+                  color=DOOR_COLOR, linewidth=0.8, linestyle="--", zorder=6)
+        ax.add_patch(arc)
+
+    elif door.wall_side == "west":
+        cx = r.x
+        cy = door.position
+        ax.plot([cx, cx], [cy - hw, cy + hw], color="white", linewidth=4, zorder=5)
+        ax.plot([cx, cx + dw], [cy - hw, cy - hw], color=DOOR_COLOR, linewidth=1.2, zorder=6)
+        arc = Arc((cx, cy - hw), dw * 2, dw * 2, angle=0, theta1=0, theta2=90,
+                  color=DOOR_COLOR, linewidth=0.8, linestyle="--", zorder=6)
+        ax.add_patch(arc)
+
+    elif door.wall_side == "north":
+        cx = door.position
+        cy = r.y2
+        ax.plot([cx - hw, cx + hw], [cy, cy], color="white", linewidth=4, zorder=5)
+        ax.plot([cx - hw, cx - hw], [cy, cy - dw], color=DOOR_COLOR, linewidth=1.2, zorder=6)
+        arc = Arc((cx - hw, cy), dw * 2, dw * 2, angle=0, theta1=270, theta2=360,
+                  color=DOOR_COLOR, linewidth=0.8, linestyle="--", zorder=6)
+        ax.add_patch(arc)
+
+    elif door.wall_side == "south":
+        cx = door.position
+        cy = r.y
+        ax.plot([cx - hw, cx + hw], [cy, cy], color="white", linewidth=4, zorder=5)
+        ax.plot([cx - hw, cx - hw], [cy, cy + dw], color=DOOR_COLOR, linewidth=1.2, zorder=6)
+        arc = Arc((cx - hw, cy), dw * 2, dw * 2, angle=0, theta1=0, theta2=90,
+                  color=DOOR_COLOR, linewidth=0.8, linestyle="--", zorder=6)
+        ax.add_patch(arc)
+
+
+# ── Pencereler ────────────────────────────────────────────────────────────────
+
+def _draw_window(ax, room: PlacedRoom, window):
+    """Pencereyi mimari standartta çiz (çift çizgi, dış duvarda)."""
+    r = room.rect
+    hw = window.width / 2
+    gap = 0.08  # çift çizgi arası
+
+    if window.wall_side in ("north", "south"):
+        y = r.y2 if window.wall_side == "north" else r.y
+        x1, x2 = window.position - hw, window.position + hw
+        # Duvar üzerinde boşluk
+        ax.plot([x1, x2], [y, y], color="white", linewidth=5, zorder=4)
+        # Çift çizgi (cam)
+        ax.plot([x1, x2], [y - gap, y - gap], color=WINDOW_COLOR, linewidth=1.5, zorder=5)
+        ax.plot([x1, x2], [y + gap, y + gap], color=WINDOW_COLOR, linewidth=1.5, zorder=5)
+        # Uç çizgiler
+        ax.plot([x1, x1], [y - gap, y + gap], color=WINDOW_COLOR, linewidth=1.0, zorder=5)
+        ax.plot([x2, x2], [y - gap, y + gap], color=WINDOW_COLOR, linewidth=1.0, zorder=5)
+    else:
+        x = r.x2 if window.wall_side == "east" else r.x
+        y1, y2 = window.position - hw, window.position + hw
+        ax.plot([x, x], [y1, y2], color="white", linewidth=5, zorder=4)
+        ax.plot([x - gap, x - gap], [y1, y2], color=WINDOW_COLOR, linewidth=1.5, zorder=5)
+        ax.plot([x + gap, x + gap], [y1, y2], color=WINDOW_COLOR, linewidth=1.5, zorder=5)
+        ax.plot([x - gap, x + gap], [y1, y1], color=WINDOW_COLOR, linewidth=1.0, zorder=5)
+        ax.plot([x - gap, x + gap], [y2, y2], color=WINDOW_COLOR, linewidth=1.0, zorder=5)
+
+
+# ── Mobilya çizimi ────────────────────────────────────────────────────────────
+
+def _draw_furniture(ax, room_rect: Rect, item: FurnitureItem):
+    """Mobilya parçasını oda içinde çiz."""
+    rx, ry = room_rect.x, room_rect.y
+    fx = rx + item.x
+    fy = ry + item.y
+    fw, fh = item.width, item.height
+
+    if item.shape == "circle":
+        circle = Circle(
+            (fx + fw / 2, fy + fh / 2), fw / 2,
+            fc=FURNITURE_FILL, ec=FURNITURE_COLOR, linewidth=0.6, zorder=3,
+        )
+        ax.add_patch(circle)
+    elif item.shape == "arc":
+        # Yarım daire (lavabo gibi)
+        arc_patch = Arc(
+            (fx + fw / 2, fy), fw, fh * 2, angle=0, theta1=0, theta2=180,
+            color=FURNITURE_COLOR, linewidth=0.7, zorder=3,
+        )
+        ax.add_patch(arc_patch)
+        ax.plot([fx, fx + fw], [fy, fy], color=FURNITURE_COLOR, linewidth=0.7, zorder=3)
+    else:
+        # Dikdörtgen
+        furn_patch = patches.Rectangle(
+            (fx, fy), fw, fh,
+            linewidth=0.6, edgecolor=FURNITURE_COLOR, facecolor=FURNITURE_FILL, zorder=3,
+        )
+        ax.add_patch(furn_patch)
+
+        # Özel çizimler
+        if "Yatak" in item.name:
+            _draw_bed_detail(ax, fx, fy, fw, fh)
+        elif "Klozet" in item.name:
+            _draw_toilet_detail(ax, fx, fy, fw, fh)
+        elif "Küvet" in item.name or "Duş" in item.name:
+            _draw_bath_detail(ax, fx, fy, fw, fh)
+        elif "Koltuk" in item.name:
+            _draw_sofa_detail(ax, fx, fy, fw, fh)
+        elif "Ocak" in item.name:
+            _draw_stove_detail(ax, fx, fy, fw, fh)
+
+
+def _draw_bed_detail(ax, x, y, w, h):
+    """Yatak detayı: yastık."""
+    pw = w * 0.35
+    ph = 0.25
+    # İki yastık üst kısımda
+    py = y + h - ph - 0.1
+    ax.add_patch(patches.FancyBboxPatch(
+        (x + 0.1, py), pw, ph, boxstyle="round,pad=0.03",
+        fc="#E8E8E8", ec=FURNITURE_COLOR, linewidth=0.4, zorder=4,
+    ))
+    ax.add_patch(patches.FancyBboxPatch(
+        (x + w - pw - 0.1, py), pw, ph, boxstyle="round,pad=0.03",
+        fc="#E8E8E8", ec=FURNITURE_COLOR, linewidth=0.4, zorder=4,
+    ))
+
+
+def _draw_toilet_detail(ax, x, y, w, h):
+    """Klozet detayı: oval."""
+    cx, cy = x + w / 2, y + h * 0.55
+    ax.add_patch(patches.Ellipse(
+        (cx, cy), w * 0.7, h * 0.55,
+        fc="white", ec=FURNITURE_COLOR, linewidth=0.5, zorder=4,
+    ))
+
+
+def _draw_bath_detail(ax, x, y, w, h):
+    """Küvet/duş detayı."""
+    ax.add_patch(patches.FancyBboxPatch(
+        (x + 0.05, y + 0.05), w - 0.10, h - 0.10,
+        boxstyle="round,pad=0.05",
+        fc="#EEF4F8", ec=FURNITURE_COLOR, linewidth=0.4, zorder=4,
+    ))
+
+
+def _draw_sofa_detail(ax, x, y, w, h):
+    """Koltuk detayı: arka yaslanma."""
+    back_h = h * 0.25
+    ax.add_patch(patches.Rectangle(
+        (x, y + h - back_h), w, back_h,
+        fc="#E0E0E0", ec=FURNITURE_COLOR, linewidth=0.4, zorder=4,
+    ))
+
+
+def _draw_stove_detail(ax, x, y, w, h):
+    """Ocak detayı: 4 daire."""
+    r = min(w, h) * 0.18
+    positions = [
+        (x + w * 0.3, y + h * 0.3),
+        (x + w * 0.7, y + h * 0.3),
+        (x + w * 0.3, y + h * 0.7),
+        (x + w * 0.7, y + h * 0.7),
+    ]
+    for px, py in positions:
+        ax.add_patch(Circle((px, py), r, fc="none", ec=FURNITURE_COLOR, linewidth=0.5, zorder=4))
+
+
+# ── Özel semboller ────────────────────────────────────────────────────────────
+
+def _draw_stairs_symbol(ax, rect):
+    """
+    Merdiven sembolü: U-dönüş merdiven (iki kollu).
+    Şaft tam kat yüksekliğini kaplar, basamaklar sadece ortadaki
+    merdiven evi bölgesinde çizilir (config'den stairs_length kadar).
+    """
+    from core.building_codes import BuildingCodes
+    codes = BuildingCodes()
+    stair_flight_h = codes.stairs_length  # Merdiven evi uzunluğu (ör. 5.0m)
+
+    # Merdiven basamaklarının çizileceği bölge (ortada)
+    flight_cy = rect.cy
+    flight_top = flight_cy + stair_flight_h / 2
+    flight_bot = flight_cy - stair_flight_h / 2
+
+    # Sınır kontrolü
+    flight_top = min(flight_top, rect.y2 - 0.2)
+    flight_bot = max(flight_bot, rect.y + 0.2)
+    actual_h = flight_top - flight_bot
+
+    if actual_h < 2.0:
+        # Çok küçükse basit çizgiler
+        n_steps = max(4, int(actual_h / 0.3))
+        for i in range(n_steps):
+            y = flight_bot + i * (actual_h / n_steps)
+            ax.plot([rect.x + 0.15, rect.x2 - 0.15], [y, y],
+                    color="#888", linewidth=0.5, zorder=3)
+        return
+
+    margin = 0.15
+    mid_x = rect.cx
+    arm_w = (rect.w - 2 * margin - 0.15) / 2  # İki kol arası 0.15m boşluk
+    left_x1, left_x2 = rect.x + margin, rect.x + margin + arm_w
+    right_x1, right_x2 = rect.x2 - margin - arm_w, rect.x2 - margin
+
+    # Sol kol: aşağıdan yukarıya (çıkış)
+    half_h = actual_h / 2
+    landing_h = min(1.2, half_h * 0.25)
+    flight_h = half_h - landing_h
+
+    # Sol kol basamakları
+    n_steps_arm = max(4, int(flight_h / 0.28))
+    step_h = flight_h / n_steps_arm
+    for i in range(n_steps_arm + 1):
+        y = flight_bot + landing_h + i * step_h
+        ax.plot([left_x1, left_x2], [y, y], color="#888", linewidth=0.5, zorder=3)
+    # Sol kol yan çizgiler
+    ax.plot([left_x1, left_x1], [flight_bot + landing_h, flight_bot + landing_h + flight_h],
+            color="#888", linewidth=0.6, zorder=3)
+    ax.plot([left_x2, left_x2], [flight_bot + landing_h, flight_bot + landing_h + flight_h],
+            color="#888", linewidth=0.6, zorder=3)
+
+    # Sağ kol basamakları (ters yön)
+    for i in range(n_steps_arm + 1):
+        y = flight_top - landing_h - i * step_h
+        ax.plot([right_x1, right_x2], [y, y], color="#888", linewidth=0.5, zorder=3)
+    # Sağ kol yan çizgiler
+    ax.plot([right_x1, right_x1], [flight_top - landing_h - flight_h, flight_top - landing_h],
+            color="#888", linewidth=0.6, zorder=3)
+    ax.plot([right_x2, right_x2], [flight_top - landing_h - flight_h, flight_top - landing_h],
+            color="#888", linewidth=0.6, zorder=3)
+
+    # Alt sahanlık
+    ax.plot([left_x1, right_x2], [flight_bot + landing_h, flight_bot + landing_h],
+            color="#888", linewidth=0.6, zorder=3)
+    ax.plot([left_x1, right_x2], [flight_bot, flight_bot],
+            color="#888", linewidth=0.6, zorder=3)
+
+    # Üst sahanlık
+    ax.plot([left_x1, right_x2], [flight_top - landing_h, flight_top - landing_h],
+            color="#888", linewidth=0.6, zorder=3)
+    ax.plot([left_x1, right_x2], [flight_top, flight_top],
+            color="#888", linewidth=0.6, zorder=3)
+
+    # Yön oku (sol kolda yukarı)
+    arrow_x = (left_x1 + left_x2) / 2
+    ax.annotate("", xy=(arrow_x, flight_bot + landing_h + flight_h - 0.1),
+                xytext=(arrow_x, flight_bot + landing_h + 0.3),
+                arrowprops=dict(arrowstyle="->", color="#555", lw=1.0), zorder=4)
+
+    # Ayırıcı çizgi (iki kol arası)
+    ax.plot([mid_x, mid_x], [flight_bot + landing_h, flight_top - landing_h],
+            color="#888", linewidth=0.4, linestyle="--", zorder=3)
+
+
+def _draw_elevator_symbol(ax, rect):
+    """
+    Asansör sembolü: kuyu tam yüksekliktir, X sembolü sadece ortadaki
+    kabin bölgesinde çizilir.
+    """
+    from core.building_codes import BuildingCodes
+    codes = BuildingCodes()
+    cabin_h = codes.elevator_length  # Kabin uzunluğu (ör. 2.5m)
+
+    # Kabin bölgesi (ortada)
+    cabin_cy = rect.cy
+    cabin_top = min(cabin_cy + cabin_h / 2, rect.y2 - 0.1)
+    cabin_bot = max(cabin_cy - cabin_h / 2, rect.y + 0.1)
+
+    margin = 0.15
+
+    # Kabin dikdörtgeni
+    cx1, cy1 = rect.x + margin, cabin_bot
+    cw = rect.w - 2 * margin
+    ch = cabin_top - cabin_bot
+    ax.add_patch(patches.Rectangle(
+        (cx1, cy1), cw, ch,
+        fc="#E8E8E8", ec="#888", linewidth=0.8, zorder=3,
+    ))
+
+    # X çapraz çizgiler (kabin içinde)
+    ax.plot([cx1, cx1 + cw], [cy1, cy1 + ch], color="#888", linewidth=0.6, zorder=3)
+    ax.plot([cx1, cx1 + cw], [cy1 + ch, cy1], color="#888", linewidth=0.6, zorder=3)
+
+    # Kapı gösterimi (ortada ince çizgi)
+    door_y = cabin_cy
+    ax.plot([rect.x2 - 0.05, rect.x2 + 0.05], [door_y - 0.4, door_y - 0.4],
+            color="#444", linewidth=1.5, zorder=4)
+    ax.plot([rect.x2 - 0.05, rect.x2 + 0.05], [door_y + 0.4, door_y + 0.4],
+            color="#444", linewidth=1.5, zorder=4)
+
+
+def _draw_entry_arrow(ax, plan: FloorPlan):
+    """Giriş okunu çiz."""
+    for room in plan.rooms:
+        if room.room_type == RoomType.KORIDOR_BINA:
+            # Bina koridorunun ortasına giriş oku
+            ax.annotate(
+                "",
+                xy=(room.rect.cx, room.rect.y),
+                xytext=(room.rect.cx, room.rect.y - 1.0),
+                arrowprops=dict(arrowstyle="-|>", color="#333", lw=2),
+                zorder=10,
+            )
+            ax.text(room.rect.cx, room.rect.y - 1.3, "GİRİŞ",
+                    ha="center", fontsize=9, fontweight="bold", color="#333")
+            break
+
+
+# ── Etiketler ─────────────────────────────────────────────────────────────────
+
+def _draw_label(ax, room: PlacedRoom):
+    """Oda etiketi: Ad + m²."""
+    if room.rect.w < 0.5 or room.rect.h < 0.5:
+        return
+
+    name = ROOM_DISPLAY_NAMES.get(room.room_type, room.room_type.value)
+    cx, cy = room.rect.cx, room.rect.cy
+    font_size = max(5.5, min(9, room.rect.min_dim * 2.0))
+
+    # Merdiven ve asansör şaft elemanları: alan gösterme, sadece isim
+    # (şaft tüm kat yüksekliğini kaplar, alan yanıltıcı olur)
+    is_shaft = room.room_type in (RoomType.MERDIVEN, RoomType.ASANSOR)
+
+    ax.text(cx, cy + font_size * 0.012, name,
+            ha="center", va="bottom", fontsize=font_size,
+            fontweight="bold", color=LABEL_COLOR, zorder=8)
+    if not is_shaft:
+        ax.text(cx, cy - font_size * 0.012, f"{room.area:.1f} m²",
+                ha="center", va="top", fontsize=font_size * 0.8,
+                color="#666666", zorder=8)
+`,
+          "export/dxf_exporter.py": `"""
+Adım 10: DXF dışa aktarma.
+ezdxf ile AutoCAD/LibreCAD uyumlu DXF dosyası üretir.
+Katmanlar: ROOMS, WALLS, DOORS, WINDOWS, LABELS, DIMENSIONS
+"""
+
+from __future__ import annotations
+
+import io
+from pathlib import Path
+
+import ezdxf
+from ezdxf.enums import TextEntityAlignment
+
+from core.models import FloorPlan, PlacedRoom, RoomType, WallSegment
+
+
+# Oda tiplerine göre renkler (AutoCAD ACI renk indeksleri)
+ROOM_COLORS = {
+    RoomType.SALON: 3,           # yeşil
+    RoomType.YATAK_ODASI: 5,     # mavi
+    RoomType.ODA: 4,             # cyan
+    RoomType.MUTFAK: 1,          # kırmızı
+    RoomType.BANYO: 6,           # magenta
+    RoomType.TUVALET: 6,         # magenta
+    RoomType.ANTRE: 8,           # gri
+    RoomType.KORIDOR_DAIRE: 8,   # gri
+    RoomType.KORIDOR_BINA: 8,    # gri
+    RoomType.MERDIVEN: 9,        # açık gri
+    RoomType.ASANSOR: 9,         # açık gri
+}
+
+
+def export_to_dxf(plan: FloorPlan, filepath: str | Path | None = None) -> bytes | None:
+    """
+    FloorPlan'ı DXF dosyasına aktar.
+    filepath verilirse dosyaya yazar, verilmezse bytes döndürür.
+    """
+    doc = ezdxf.new("R2013")
+    msp = doc.modelspace()
+
+    # Katmanları oluştur
+    doc.layers.add("BUILDING", color=7)       # beyaz
+    doc.layers.add("ROOMS", color=3)          # yeşil
+    doc.layers.add("WALLS", color=7)          # beyaz
+    doc.layers.add("DOORS", color=1)          # kırmızı
+    doc.layers.add("WINDOWS", color=5)        # mavi
+    doc.layers.add("LABELS", color=7)         # beyaz
+    doc.layers.add("DIMENSIONS", color=2)     # sarı
+
+    # Bina dış sınırı
+    br = plan.building_rect
+    _draw_rect(msp, br.x, br.y, br.w, br.h, "BUILDING", color=7)
+
+    # Odalar
+    for room in plan.rooms:
+        color = ROOM_COLORS.get(room.room_type, 7)
+        _draw_rect(msp, room.rect.x, room.rect.y, room.rect.w, room.rect.h, "ROOMS", color=color)
+
+        # Etiket
+        _draw_label(msp, room, "LABELS")
+
+        # Kapılar
+        for door in room.doors:
+            _draw_door(msp, room, door, "DOORS")
+
+        # Pencereler
+        for window in room.windows:
+            _draw_window(msp, room, window, "WINDOWS")
+
+    # Duvarlar
+    for wall in plan.walls:
+        _draw_wall(msp, wall, "WALLS")
+
+    # Ölçü çizgileri (bina dış kenarlar)
+    _draw_dimensions(msp, plan, "DIMENSIONS")
+
+    if filepath:
+        doc.saveas(str(filepath))
+        return None
+    else:
+        stream = io.StringIO()
+        doc.write(stream)
+        return stream.getvalue().encode("utf-8")
+
+
+def _draw_rect(msp, x: float, y: float, w: float, h: float, layer: str, color: int = 7):
+    """Dikdörtgen çiz."""
+    points = [(x, y), (x + w, y), (x + w, y + h), (x, y + h), (x, y)]
+    msp.add_lwpolyline(points, dxfattribs={"layer": layer, "color": color})
+
+
+def _draw_label(msp, room: PlacedRoom, layer: str):
+    """Oda etiketi (ad + m²)."""
+    display_names = {
+        RoomType.SALON: "Salon",
+        RoomType.YATAK_ODASI: "Yatak Odası",
+        RoomType.ODA: "Oda",
+        RoomType.MUTFAK: "Mutfak",
+        RoomType.BANYO: "Banyo",
+        RoomType.TUVALET: "WC",
+        RoomType.ANTRE: "Antre",
+        RoomType.KORIDOR_DAIRE: "Koridor",
+        RoomType.KORIDOR_BINA: "Koridor",
+        RoomType.MERDIVEN: "Merdiven",
+        RoomType.ASANSOR: "Asansör",
+    }
+    name = display_names.get(room.room_type, room.room_type.value)
+
+    # İlk satır: oda adı
+    text_height = min(0.3, room.rect.min_dim * 0.15)
+    cx, cy = room.rect.cx, room.rect.cy
+
+    msp.add_text(
+        name,
+        height=text_height,
+        dxfattribs={"layer": layer, "color": 7},
+    ).set_placement((cx, cy + text_height * 0.6), align=TextEntityAlignment.MIDDLE_CENTER)
+
+    # İkinci satır: alan
+    msp.add_text(
+        f"{room.area:.1f} m²",
+        height=text_height * 0.8,
+        dxfattribs={"layer": layer, "color": 7},
+    ).set_placement((cx, cy - text_height * 0.6), align=TextEntityAlignment.MIDDLE_CENTER)
+
+
+def _draw_door(msp, room: PlacedRoom, door, layer: str):
+    """Kapıyı çiz (basit açıklık)."""
+    r = room.rect
+    hw = door.width / 2
+
+    if door.wall_side == "north":
+        x1 = door.position - hw
+        msp.add_line((x1, r.y2), (x1 + door.width, r.y2), dxfattribs={"layer": layer, "color": 1})
+    elif door.wall_side == "south":
+        x1 = door.position - hw
+        msp.add_line((x1, r.y), (x1 + door.width, r.y), dxfattribs={"layer": layer, "color": 1})
+    elif door.wall_side == "east":
+        y1 = door.position - hw
+        msp.add_line((r.x2, y1), (r.x2, y1 + door.width), dxfattribs={"layer": layer, "color": 1})
+    elif door.wall_side == "west":
+        y1 = door.position - hw
+        msp.add_line((r.x, y1), (r.x, y1 + door.width), dxfattribs={"layer": layer, "color": 1})
+
+
+def _draw_window(msp, room: PlacedRoom, window, layer: str):
+    """Pencereyi çiz (dış duvarda çizgi)."""
+    r = room.rect
+    hw = window.width / 2
+
+    if window.wall_side == "north":
+        x1 = window.position - hw
+        y = r.y2
+        msp.add_line((x1, y - 0.05), (x1 + window.width, y - 0.05), dxfattribs={"layer": layer, "color": 5})
+        msp.add_line((x1, y + 0.05), (x1 + window.width, y + 0.05), dxfattribs={"layer": layer, "color": 5})
+    elif window.wall_side == "south":
+        x1 = window.position - hw
+        y = r.y
+        msp.add_line((x1, y - 0.05), (x1 + window.width, y - 0.05), dxfattribs={"layer": layer, "color": 5})
+        msp.add_line((x1, y + 0.05), (x1 + window.width, y + 0.05), dxfattribs={"layer": layer, "color": 5})
+    elif window.wall_side == "east":
+        y1 = window.position - hw
+        x = r.x2
+        msp.add_line((x - 0.05, y1), (x - 0.05, y1 + window.width), dxfattribs={"layer": layer, "color": 5})
+        msp.add_line((x + 0.05, y1), (x + 0.05, y1 + window.width), dxfattribs={"layer": layer, "color": 5})
+    elif window.wall_side == "west":
+        y1 = window.position - hw
+        x = r.x
+        msp.add_line((x - 0.05, y1), (x - 0.05, y1 + window.width), dxfattribs={"layer": layer, "color": 5})
+        msp.add_line((x + 0.05, y1), (x + 0.05, y1 + window.width), dxfattribs={"layer": layer, "color": 5})
+
+
+def _draw_wall(msp, wall: WallSegment, layer: str):
+    """Duvar segmentini çiz."""
+    color = 7 if wall.is_exterior else 8
+    msp.add_line(
+        (wall.start.x, wall.start.y),
+        (wall.end.x, wall.end.y),
+        dxfattribs={"layer": layer, "color": color, "lineweight": 50 if wall.is_exterior else 25},
+    )
+
+
+def _draw_dimensions(msp, plan: FloorPlan, layer: str):
+    """Bina dış kenar ölçülerini çiz."""
+    br = plan.building_rect
+    offset = 1.0  # Ölçü çizgisi bina dışında
+
+    # Alt kenar ölçüsü
+    msp.add_aligned_dim(
+        p1=(br.x, br.y - offset),
+        p2=(br.x2, br.y - offset),
+        distance=0.5,
+        dxfattribs={"layer": layer},
+    ).render()
+
+    # Sol kenar ölçüsü
+    msp.add_aligned_dim(
+        p1=(br.x - offset, br.y),
+        p2=(br.x - offset, br.y2),
+        distance=0.5,
+        dxfattribs={"layer": layer},
+    ).render()
+`,
+          "pages/admin.py": `"""
+Admin Sayfası - PAİY (Planlı Alanlar İmar Yönetmeliği) Kısıtlarını Düzenleme
+Madde referansları: 5, 23, 28, 29, 30, 31, 32, 34, 38, 39
+"""
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+import streamlit as st
+import json
+
+from core.building_codes import BuildingCodes, DEFAULT_CONFIG_PATH
+
+st.set_page_config(page_title="Ayarlar - PAİY Kısıtları", page_icon="⚙️", layout="wide")
+
+st.title("⚙️ PAİY Yapı Yönetmeliği Ayarları")
+st.caption("Planlı Alanlar İmar Yönetmeliği uyumlu kısıtlar. Değişiklikler kaydedildiğinde hemen uygulanır.")
+st.info(
+    "📋 **Kaynak:** PAİY Madde 29 (piyes min), Madde 30 (dolaşım), Madde 31 (merdiven), "
+    "Madde 32 (ışıklık), Madde 34 (asansör), Madde 38 (korkuluk), Madde 39 (kapı/pencere). "
+    "Son değişiklikler: RG 32838 (11.03.2025), RG 32985 (13.08.2025). "
+    "Eskişehir özelinde parselin bağlı olduğu idarenin imar durumu ek kısıt getirebilir."
+)
+
+# ── Yükle ─────────────────────────────────────────────────────────────────────
+
+codes = BuildingCodes()
+
+# ══════════════════════════════════════════════════════════════════════════════
+# A) ODA / PİYES MİNİMUMLARI (Madde 29)
+# ══════════════════════════════════════════════════════════════════════════════
+
+st.header("A) Oda / Piyes Minimumları (Madde 29)")
+st.caption("Her oda tipi için PAİY'nin zorunlu kıldığı minimum alan ve dar kenar ölçüsü.")
+
+# Minimum Alanlar
+st.subheader("Minimum Alanlar (m²)")
+min_areas = codes.raw.get("min_areas", {})
+col1, col2, col3 = st.columns(3)
+updated_min_areas = {}
+items = list(min_areas.items())
+for i, (key, val) in enumerate(items):
+    with [col1, col2, col3][i % 3]:
+        display = key.replace("_", " ").title()
+        updated_min_areas[key] = st.number_input(
+            f"{display}", value=float(val or 0), min_value=0.0, step=0.5,
+            key=f"min_area_{key}",
+        )
+
+# Minimum Genişlikler
+st.subheader("Minimum Dar Kenar (m)")
+min_widths = codes.raw.get("min_widths", {})
+col1, col2, col3 = st.columns(3)
+updated_min_widths = {}
+items = list(min_widths.items())
+for i, (key, val) in enumerate(items):
+    with [col1, col2, col3][i % 3]:
+        display = key.replace("_", " ").title()
+        updated_min_widths[key] = st.number_input(
+            f"{display}", value=float(val), min_value=0.0, step=0.1,
+            key=f"min_width_{key}",
+        )
+
+# ══════════════════════════════════════════════════════════════════════════════
+# B) DOLAŞIM ALANLARI (Madde 29, 30)
+# ══════════════════════════════════════════════════════════════════════════════
+
+st.divider()
+st.header("B) Dolaşım Alanları (Madde 29, 30)")
+
+col1, col2, col3 = st.columns(3)
+with col1:
+    bldg_corr_w = st.number_input(
+        "Bina koridoru min genişlik (m)",
+        value=codes.raw.get("building_corridor", {}).get("min_width", 1.50),
+        step=0.1, key="bldg_corr_w",
+        help="Madde 30(1): Bina giriş holü ve koridor min genişlik"
+    )
+with col2:
+    apt_corr_w = st.number_input(
+        "Daire içi koridor min genişlik (m)",
+        value=codes.raw.get("apartment_corridor", {}).get("min_width", 1.20),
+        step=0.1, key="apt_corr_w",
+        help="Madde 29(3): Daire içi hol/koridor"
+    )
+with col3:
+    bldg_entry_w = st.number_input(
+        "Bina giriş holü min genişlik (m)",
+        value=codes.raw.get("building_entry", {}).get("min_width", 1.50),
+        step=0.1, key="bldg_entry_w",
+        help="Madde 30(1): Ana merdiven ve asansöre ulaşana kadar"
+    )
+
+# ══════════════════════════════════════════════════════════════════════════════
+# C) MERDİVEN (Madde 31, 38)
+# ══════════════════════════════════════════════════════════════════════════════
+
+st.divider()
+st.header("C) Merdiven Ölçüleri (Madde 31, 38)")
+
+stairs = codes.raw.get("stairs", {})
+
+col1, col2 = st.columns(2)
+with col1:
+    st.markdown("**Şaft Boyutları**")
+    stairs_w = st.number_input(
+        "Merdiven evi genişlik (m)", value=stairs.get("width", 3.00),
+        step=0.1, key="stairs_w",
+        help="2×kol + boşluk + duvarlar. Şaft tam kat yüksekliğini kaplar."
+    )
+    stairs_l = st.number_input(
+        "Merdiven evi uzunluk (m)", value=stairs.get("length", 6.00),
+        step=0.1, key="stairs_l",
+        help="Basamak sembolü bu alan içinde çizilir"
+    )
+    stairs_arm = st.number_input(
+        "Kol genişliği - konut (m)", value=stairs.get("arm_width", 1.20),
+        step=0.05, key="stairs_arm",
+        help="Madde 31(1a): Konut ortak merdiven kolu min genişlik"
+    )
+with col2:
+    st.markdown("**Basamak ve Korkuluk**")
+    stairs_riser_elev = st.number_input(
+        "Rıht max - asansörlü (m)", value=stairs.get("riser_max_with_elevator", 0.18),
+        step=0.01, key="stairs_riser_e",
+        help="Madde 31(2a): Asansörlü binada max rıht"
+    )
+    stairs_riser_no = st.number_input(
+        "Rıht max - asansörsüz (m)", value=stairs.get("riser_max_without_elevator", 0.16),
+        step=0.01, key="stairs_riser_n",
+        help="Madde 31(2a): Asansörsüz binada max rıht"
+    )
+    stairs_tread = st.number_input(
+        "Basamak genişliği min (m)", value=stairs.get("tread_min", 0.27),
+        step=0.01, key="stairs_tread",
+        help="Madde 31(2b): Formül: 2a+b = 60-64 cm"
+    )
+    stairs_handrail = st.number_input(
+        "Korkuluk yüksekliği min (m)", value=stairs.get("handrail_height", 1.10),
+        step=0.05, key="stairs_handrail",
+        help="Madde 38(1): Merdiven ve boşluklarda korkuluk"
+    )
+
+# ══════════════════════════════════════════════════════════════════════════════
+# D) ASANSÖR (Madde 34)
+# ══════════════════════════════════════════════════════════════════════════════
+
+st.divider()
+st.header("D) Asansör Gereksinimleri (Madde 34)")
+
+elev = codes.raw.get("elevator_shaft", {})
+
+col1, col2 = st.columns(2)
+with col1:
+    st.markdown("**Kuyu Boyutları**")
+    elev_w = st.number_input(
+        "Kuyu genişlik (m)", value=elev.get("width", 2.50),
+        step=0.1, key="elev_w",
+        help="Kuyu tam kat yüksekliğini kaplar"
+    )
+    elev_l = st.number_input(
+        "Kuyu uzunluk (m)", value=elev.get("length", 2.50),
+        step=0.1, key="elev_l",
+    )
+    st.caption(f"Kabin min: {elev.get('cabin_min_width', 1.20)}m × "
+               f"{elev.get('cabin_min_length', 1.50)}m "
+               f"(alan min {elev.get('cabin_min_area', 1.80)}m²)")
+    st.caption(f"Kapı net geçiş min: {elev.get('door_min_width', 0.90)}m")
+
+with col2:
+    st.markdown("**Zorunluluklar**")
+    st.caption(f"• {elev.get('min_floors_space', 3)} kat: asansör **yeri** zorunlu")
+    st.caption(f"• {elev.get('min_floors_required', 4)}+ kat: asansör **montajı** zorunlu")
+    st.caption(f"• {elev.get('dual_elevator_floors', 10)} kat veya "
+               f"{elev.get('dual_elevator_apartments', 20)}+ daire: **çift asansör** zorunlu")
+    st.caption(f"• {elev.get('fire_elevator_floors', 10)}+ kat: 1 asansör yangına dayanıklı")
+    st.caption(f"• {elev.get('stretcher_min_floors', 10)}+ kat: sedye asansörü "
+               f"(min {elev.get('stretcher_cabin_width', 1.20)}×{elev.get('stretcher_cabin_length', 2.10)}m)")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# E) KAPI ve PENCERE (Madde 39)
+# ══════════════════════════════════════════════════════════════════════════════
+
+st.divider()
+st.header("E) Kapı Boyutları (Madde 39)")
+
+doors = codes.raw.get("doors", {})
+col1, col2, col3, col4, col5 = st.columns(5)
+
+updated_doors = {}
+with col1:
+    std = doors.get("standard", {})
+    updated_doors["standard"] = {
+        "width": st.number_input("Oda genişlik", value=std.get("width", 0.90), step=0.05, key="door_std_w"),
+        "height": st.number_input("Oda yükseklik", value=std.get("height", 2.10), step=0.05, key="door_std_h"),
+    }
+with col2:
+    bny = doors.get("banyo", {})
+    updated_doors["banyo"] = {
+        "width": st.number_input("Banyo genişlik", value=bny.get("width", 0.80) if isinstance(bny, dict) else 0.80, step=0.05, key="door_bny_w"),
+        "height": st.number_input("Banyo yükseklik", value=bny.get("height", 2.10) if isinstance(bny, dict) else 2.10, step=0.05, key="door_bny_h"),
+    }
+with col3:
+    wc = doors.get("tuvalet", {})
+    updated_doors["tuvalet"] = {
+        "width": st.number_input("WC genişlik", value=wc.get("width", 0.80) if isinstance(wc, dict) else 0.80, step=0.05, key="door_wc_w"),
+        "height": st.number_input("WC yükseklik", value=wc.get("height", 2.10) if isinstance(wc, dict) else 2.10, step=0.05, key="door_wc_h"),
+    }
+with col4:
+    grs = doors.get("giris", {})
+    updated_doors["giris"] = {
+        "width": st.number_input("Daire giriş gen.", value=grs.get("width", 1.00) if isinstance(grs, dict) else 1.00, step=0.05, key="door_grs_w"),
+        "height": st.number_input("Daire giriş yük.", value=grs.get("height", 2.10) if isinstance(grs, dict) else 2.10, step=0.05, key="door_grs_h"),
+    }
+with col5:
+    bg = doors.get("bina_giris", {})
+    updated_doors["bina_giris"] = {
+        "width": st.number_input("Bina giriş gen.", value=bg.get("width", 1.50) if isinstance(bg, dict) else 1.50, step=0.05, key="door_bg_w"),
+        "height": st.number_input("Bina giriş yük.", value=bg.get("height", 2.10) if isinstance(bg, dict) else 2.10, step=0.05, key="door_bg_h"),
+    }
+
+# ══════════════════════════════════════════════════════════════════════════════
+# F) DUVAR ve KAT YÜKSEKLİKLERİ (Madde 28)
+# ══════════════════════════════════════════════════════════════════════════════
+
+st.divider()
+st.header("F) Duvar ve Kat Yükseklikleri (Madde 28)")
+
+col1, col2 = st.columns(2)
+
+with col1:
+    st.markdown("**Duvar Kalınlıkları (m)**")
+    walls = codes.raw.get("walls", {})
+    new_outer = st.number_input("Dış duvar", value=walls.get("outer_thickness", 0.25), step=0.05, key="wall_outer")
+    new_inner = st.number_input("İç duvar", value=walls.get("inner_thickness", 0.15), step=0.05, key="wall_inner")
+    new_carrier = st.number_input("Taşıyıcı duvar", value=walls.get("carrier_thickness", 0.20), step=0.05, key="wall_carrier")
+
+with col2:
+    st.markdown("**Kat Yükseklikleri (m)**")
+    floor_h = st.number_input(
+        "Brüt kat yüksekliği", value=codes.raw.get("floor_height", 2.80),
+        step=0.1, key="floor_h",
+    )
+    floor_h_max = st.number_input(
+        "Brüt kat yüksekliği MAX", value=codes.raw.get("floor_height_max", 3.60),
+        step=0.1, key="floor_h_max",
+        help="Madde 28(1c): Konut bölgelerinde döşemeden döşemeye max"
+    )
+    ceil_h = st.number_input(
+        "Min tavan yüksekliği (iskân)", value=codes.raw.get("min_ceiling_height", 2.60),
+        step=0.1, key="ceil_h",
+        help="Madde 28(4): İskân edilen katta min net tavan yüksekliği"
+    )
+    wet_ceil_h = st.number_input(
+        "Islak hacim tavan yüksekliği", value=codes.raw.get("wet_area_ceiling_height", 2.20),
+        step=0.1, key="wet_ceil_h",
+        help="Madde 28(5): Banyo, WC, koridor gibi alanlarda min"
+    )
+
+# ══════════════════════════════════════════════════════════════════════════════
+# G) PARSEL KISITLARI (Madde 23, 32)
+# ══════════════════════════════════════════════════════════════════════════════
+
+st.divider()
+st.header("G) Parsel ve Yerleşim (Madde 23, 32)")
+
+setbacks = codes.raw.get("setbacks", {})
+lightwell = codes.raw.get("lightwell", {})
+
+col1, col2 = st.columns(2)
+with col1:
+    st.markdown("**Bahçe Mesafeleri (m)**")
+    sb_front = st.number_input("Ön bahçe min", value=setbacks.get("front_min", 5.00), step=0.5, key="sb_front",
+                                help="Madde 23(1a)")
+    sb_side = st.number_input("Yan bahçe min", value=setbacks.get("side_min", 3.00), step=0.5, key="sb_side",
+                               help="Madde 23(1b): 4 kata kadar")
+    sb_rear = st.number_input("Arka bahçe min", value=setbacks.get("rear_min", 3.00), step=0.5, key="sb_rear",
+                               help="Madde 23(1c): 4 kata kadar")
+    sb_inc = st.number_input("Kat artış çekmesi", value=setbacks.get("floor_increment", 0.50), step=0.1, key="sb_inc",
+                              help="Madde 23(1ç): 4 katın üzerinde her kat için +m")
+
+with col2:
+    st.markdown("**Işıklık ve Hava Bacası**")
+    lw_small_edge = st.number_input("Işıklık kenar (1-6 kat)", value=lightwell.get("small_min_edge", 1.50), step=0.1, key="lw_se",
+                                     help="Madde 32(2a)")
+    lw_small_area = st.number_input("Işıklık alan (1-6 kat)", value=lightwell.get("small_min_area", 4.50), step=0.5, key="lw_sa")
+    lw_large_edge = st.number_input("Işıklık kenar (7+ kat)", value=lightwell.get("large_min_edge", 2.00), step=0.1, key="lw_le",
+                                     help="Madde 32(2b)")
+    lw_large_area = st.number_input("Işıklık alan (7+ kat)", value=lightwell.get("large_min_area", 9.00), step=0.5, key="lw_la")
+    as_w = st.number_input("Hava bacası genişlik", value=lightwell.get("air_shaft_width", 0.60), step=0.1, key="as_w",
+                            help="Madde 32(3): Sadece banyo/WC havalandırması")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# H) YANGIN / ISLAK HACİM BİLGİ
+# ══════════════════════════════════════════════════════════════════════════════
+
+st.divider()
+st.header("H) Yangın ve Islak Hacim Kuralları")
+st.caption("Bu kurallar salt okunur referans bilgisidir.")
+
+fire = codes.raw.get("fire_safety", {})
+wet_rules = codes.raw.get("wet_area_rules", {})
+
+st.markdown(f"""
+| Kural | Açıklama |
+|-------|----------|
+| Karma merdiven ayrımı | Madde 31(5): Konut + ticaret karma kullanımda ayrı merdiven evi zorunlu |
+| Yangın asansörü | Madde 34(4): 10+ katlı binalarda 1 asansör yangına dayanıklı/güç kaynaklı |
+| Havalandırma ayrımı | Madde 29(6): Mutfak/oda bacaları WC/banyo boşluğuna açılamaz |
+| Elektrik güvenliği | Madde 29(7): Islak hacim altına enerji odası kurulamaz |
+| Kaçış mesafesi | Yangın Yönetmeliği referansı (~30m) - PAİY'de doğrudan belirtilmez |
+| Erişilebilirlik | TS 9111 ve Asansör Yönetmeliği (2014/33/AB) referansı |
+""")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# KAYDET
+# ══════════════════════════════════════════════════════════════════════════════
+
+st.divider()
+
+if st.button("💾 Değişiklikleri Kaydet", type="primary", use_container_width=True):
+    # A) Oda minimumları
+    codes.raw["min_areas"] = updated_min_areas
+    codes.raw["min_widths"] = updated_min_widths
+
+    # B) Dolaşım
+    codes.raw["building_corridor"]["min_width"] = bldg_corr_w
+    codes.raw["apartment_corridor"]["min_width"] = apt_corr_w
+    codes.raw["building_entry"]["min_width"] = bldg_entry_w
+
+    # C) Merdiven (kullanıcı alanları güncelle, geri kalanını koru)
+    codes.raw["stairs"]["width"] = stairs_w
+    codes.raw["stairs"]["length"] = stairs_l
+    codes.raw["stairs"]["arm_width"] = stairs_arm
+    codes.raw["stairs"]["riser_max_with_elevator"] = stairs_riser_elev
+    codes.raw["stairs"]["riser_max_without_elevator"] = stairs_riser_no
+    codes.raw["stairs"]["tread_min"] = stairs_tread
+    codes.raw["stairs"]["handrail_height"] = stairs_handrail
+
+    # D) Asansör
+    codes.raw["elevator_shaft"]["width"] = elev_w
+    codes.raw["elevator_shaft"]["length"] = elev_l
+
+    # E) Kapılar (note alanlarını koru)
+    for door_key, door_val in updated_doors.items():
+        codes.raw["doors"][door_key] = door_val
+    # Note alanlarını koru
+    for note_key in ["standard_note", "islak_hacim_note", "giris_note", "bina_giris_note"]:
+        pass  # JSON'da zaten var, silinmez
+
+    # F) Duvar ve yükseklikler
+    codes.raw["walls"]["outer_thickness"] = new_outer
+    codes.raw["walls"]["inner_thickness"] = new_inner
+    codes.raw["walls"]["carrier_thickness"] = new_carrier
+    codes.raw["floor_height"] = floor_h
+    codes.raw["floor_height_max"] = floor_h_max
+    codes.raw["min_ceiling_height"] = ceil_h
+    codes.raw["wet_area_ceiling_height"] = wet_ceil_h
+
+    # G) Parsel
+    codes.raw.setdefault("setbacks", {})
+    codes.raw["setbacks"]["front_min"] = sb_front
+    codes.raw["setbacks"]["side_min"] = sb_side
+    codes.raw["setbacks"]["rear_min"] = sb_rear
+    codes.raw["setbacks"]["floor_increment"] = sb_inc
+
+    codes.raw.setdefault("lightwell", {})
+    codes.raw["lightwell"]["small_min_edge"] = lw_small_edge
+    codes.raw["lightwell"]["small_min_area"] = lw_small_area
+    codes.raw["lightwell"]["large_min_edge"] = lw_large_edge
+    codes.raw["lightwell"]["large_min_area"] = lw_large_area
+    codes.raw["lightwell"]["air_shaft_width"] = as_w
+
+    codes.save()
+    st.success("Ayarlar kaydedildi!")
+    st.cache_resource.clear()
+
+# ── JSON görünümü ─────────────────────────────────────────────────────────────
+
+st.divider()
+with st.expander("🔧 Ham JSON (gelişmiş düzenleme)"):
+    raw_json = json.dumps(codes.raw, ensure_ascii=False, indent=2)
+    edited = st.text_area("JSON", value=raw_json, height=400)
+    if st.button("JSON'dan Güncelle"):
+        try:
+            new_data = json.loads(edited)
+            codes._data = new_data
+            codes.save()
+            st.success("JSON'dan güncellendi!")
+            st.cache_resource.clear()
+        except json.JSONDecodeError as e:
+            st.error(f"Geçersiz JSON: {e}")
+`,
+          "config/building_codes_tr.json": `{
+  "description": "PAİY (Planlı Alanlar İmar Yönetmeliği) - Resmi Minimumlar",
+  "paiy_reference": "Madde 5, 23, 28, 29, 30, 31, 32, 34, 38, 39. Son değişiklikler: RG 32838 (11.03.2025), RG 32985 (13.08.2025)",
+
+  "_comment_A": "── A) ODA / PİYES MİNİMUMLARI (Madde 29) ──────────────────",
+
+  "mandatory_rooms": {
+    "note": "Madde 5(25), 29(1): Her müstakil konutta zorunlu piyesler",
+    "list": ["salon", "yatak_odasi", "mutfak", "banyo", "tuvalet"]
+  },
+
+  "min_areas": {
+    "salon": 12.0,
+    "yatak_odasi": 9.0,
+    "oda": 9.0,
+    "mutfak": 3.3,
+    "banyo": 3.0,
+    "tuvalet": 1.2,
+    "antre": 2.0
+  },
+  "min_widths": {
+    "salon": 3.00,
+    "yatak_odasi": 2.50,
+    "oda": 2.00,
+    "mutfak": 1.50,
+    "banyo": 1.50,
+    "tuvalet": 1.00,
+    "antre": 1.20,
+    "koridor_daire": 1.20,
+    "koridor_bina": 1.50,
+    "merdiven": 3.00
+  },
+  "preferred_area_ratios": {
+    "salon": 0.25,
+    "yatak_odasi": 0.15,
+    "oda": 0.12,
+    "mutfak": 0.10,
+    "banyo": 0.05,
+    "tuvalet": 0.02,
+    "antre": 0.04
+  },
+
+  "_comment_B": "── B) BİNA İÇ DOLAŞIM ALANLARI (Madde 29, 30, 31, 34) ────",
+
+  "building_entry": {
+    "min_width": 1.50,
+    "note": "Madde 30(1): Ana merdiven ve asansöre ulaşana kadar min genişlik"
+  },
+  "building_corridor": {
+    "min_width": 1.50,
+    "note": "Madde 30(1): Bina giriş holü ve koridor min genişliği"
+  },
+  "apartment_corridor": {
+    "min_width": 1.20,
+    "note": "Madde 29(3): Daire içi hol/koridor min genişliği"
+  },
+
+  "_comment_C": "── C) MERDİVEN ÖLÇÜLERİ (Madde 31, 38) ─────────────────",
+
+  "stairs": {
+    "arm_width": 1.20,
+    "arm_width_note": "Madde 31(1a): Konut ortak merdiven kolu min genişlik",
+    "arm_width_other": 1.50,
+    "arm_width_other_note": "Madde 31(1a): Konut dışı yapılarda min genişlik",
+    "arm_width_internal": 1.00,
+    "arm_width_internal_note": "Madde 31(1a): Daire içi (dubleks) merdiven min genişlik",
+    "riser_max_with_elevator": 0.18,
+    "riser_max_without_elevator": 0.16,
+    "riser_note": "Madde 31(2a): Asansörlü/asansörsüz max rıht yüksekliği",
+    "tread_min": 0.27,
+    "tread_note": "Madde 31(2b): Min basamak genişliği. Formül: 2a+b = 60-64 cm",
+    "step_formula": "2a+b = 60..64 cm",
+    "gap": 0.10,
+    "landing_min_width": 1.20,
+    "landing_note": "Madde 31(1a): Kat sahanlığı merdiven kolu genişliğinden az olamaz",
+    "handrail_height": 1.10,
+    "handrail_note": "Madde 38(1): Merdiven ve boşluklarda korkuluk min yüksekliği",
+    "width": 3.00,
+    "length": 6.00,
+    "shaft_note": "Şaft tam kat yüksekliğini kaplar; genişlik 2×1.20m kol + boşluk + duvarlar"
+  },
+
+  "_comment_D": "── D) ASANSÖR GEREKSİNİMLERİ (Madde 5, 34) ──────────────",
+
+  "elevator_shaft": {
+    "cabin_min_width": 1.20,
+    "cabin_min_length": 1.50,
+    "cabin_min_area": 1.80,
+    "cabin_note": "Madde 34(2): Tek asansör kabin dar kenarı min 1.20m, alan min 1.80m²",
+    "door_min_width": 0.90,
+    "door_note": "Madde 34(2): Asansör kapı net geçiş min 0.90m",
+    "landing_min_sliding": 1.20,
+    "landing_min_swing": 1.50,
+    "landing_note": "Madde 34(2): Sürgülü kapıda min 1.20m, dışa açılır kapıda min 1.50m sahanlık",
+    "min_floors_required": 4,
+    "min_floors_space": 3,
+    "floors_note": "Madde 5(27), 34(1): 3 katta yer, 4+ katta montaj zorunlu",
+    "dual_elevator_floors": 10,
+    "dual_elevator_apartments": 20,
+    "dual_note": "Madde 34(4): 10 kat veya 20+ dairede min 2 asansör",
+    "fire_elevator_floors": 10,
+    "fire_note": "Madde 34(4): 10+ katlı binalarda 1 asansör yangına dayanıklı/güç kaynaklı",
+    "stretcher_min_floors": 10,
+    "stretcher_cabin_width": 1.20,
+    "stretcher_cabin_length": 2.10,
+    "stretcher_min_area": 2.52,
+    "stretcher_door_min": 1.10,
+    "stretcher_note": "Madde 34(5): 10+ katlı binalarda sedye asansörü min 1.20×2.10m (2.52m²), kapı min 1.10m",
+    "width": 2.50,
+    "length": 2.50,
+    "shaft_note": "Kuyu tam kat yüksekliğini kaplar"
+  },
+
+  "_comment_E": "── E) KAPI ve PENCERE ÖLÇÜLERİ (Madde 39) ───────────────",
+
+  "doors": {
+    "standard": {"width": 0.90, "height": 2.10},
+    "standard_note": "Madde 39(1c): Oda kapıları net genişlik min 0.90m",
+    "banyo": {"width": 0.80, "height": 2.10},
+    "tuvalet": {"width": 0.80, "height": 2.10},
+    "islak_hacim_note": "Madde 39(1c): Islak hacim ve balkon kapıları min 0.80m",
+    "balkon": {"width": 0.80, "height": 2.10},
+    "giris": {"width": 1.00, "height": 2.10},
+    "giris_note": "Madde 39(1c): Bağımsız bölüm (daire) giriş kapısı min 1.00m",
+    "bina_giris": {"width": 1.50, "height": 2.10},
+    "bina_giris_note": "Madde 39(1b): Bina giriş kapısı min 1.50m, çift kanatta bir kanat min 1.00m"
+  },
+  "windows": {
+    "min_area_ratio": 0.10,
+    "min_width": 0.80,
+    "standard_width": 1.20,
+    "standard_height": 1.20,
+    "sill_height": 0.90,
+    "banyo_width": 0.60,
+    "banyo_height": 0.60,
+    "banyo_sill_height": 1.50,
+    "ventilation_min_width": 0.30,
+    "ventilation_min_height": 0.30,
+    "ventilation_note": "Madde 39(6): Islak hacimlerde mekanik havalandırma yoksa min 0.30×0.30m pencere"
+  },
+
+  "_comment_F": "── F) DUVAR ve KAT YÜKSEKLİKLERİ (Madde 28) ─────────────",
+
+  "walls": {
+    "outer_thickness": 0.25,
+    "inner_thickness": 0.15,
+    "carrier_thickness": 0.20,
+    "note": "Duvar kalınlığı PAİY'de sabit değil; taşıyıcı sistem, deprem, enerji ve yangın mevzuatına göre belirlenir"
+  },
+  "floor_height": 2.80,
+  "floor_height_max": 3.60,
+  "floor_height_note": "Madde 28(1c): Konut bölgelerinde döşemeden döşemeye max 3.60m",
+  "min_ceiling_height": 2.60,
+  "min_ceiling_note": "Madde 28(4): İskân edilen kat iç yüksekliği (tavan net) min 2.60m",
+  "wet_area_ceiling_height": 2.20,
+  "wet_area_ceiling_note": "Madde 28(5): Islak hacim/koridor tavan yüksekliği 2.20m'ye düşebilir",
+
+  "_comment_G": "── G) PARSEL ve YERLEŞİM KISITLARI (Madde 23, 32) ────────",
+
+  "setbacks": {
+    "front_min": 5.00,
+    "front_note": "Madde 23(1a): Ön bahçe (yol kenarından bina cephesine) min 5.00m",
+    "side_min": 3.00,
+    "rear_min": 3.00,
+    "side_rear_note": "Madde 23(1b,c): Yan ve arka bahçe min 3.00m (4 kata kadar dahil)",
+    "floor_increment": 0.50,
+    "floor_increment_base": 4,
+    "increment_note": "Madde 23(1ç): 4 katın üzerinde her kat için mesafe +0.50m artırılır"
+  },
+  "lightwell": {
+    "small_min_edge": 1.50,
+    "small_min_area": 4.50,
+    "small_max_floors": 6,
+    "small_note": "Madde 32(2a): 1-6 kat arası ışıklık min 1.50m kenar, 4.50m² alan",
+    "large_min_edge": 2.00,
+    "large_min_area": 9.00,
+    "large_min_floors": 7,
+    "large_note": "Madde 32(2b): 7+ kat ışıklık min 2.00m kenar, 9.00m² alan",
+    "air_shaft_width": 0.60,
+    "air_shaft_length": 0.60,
+    "air_shaft_note": "Madde 32(3): Hava bacası min 0.60×0.60m, sadece banyo/WC havalandırması"
+  },
+
+  "_comment_H": "── H) YANGIN ve ISLAK HACİM KURALLARI ────────────────────",
+
+  "fire_safety": {
+    "separate_stairs_mixed_use": true,
+    "separate_stairs_note": "Madde 31(5): Karma kullanımda (konut + ticaret) ayrı merdiven evi zorunlu",
+    "fire_elevator_floors": 10,
+    "fire_elevator_note": "Madde 34(4): 10+ katlı binalarda 1 asansör yangına dayanıklı/güç kaynaklı",
+    "external_ref": "Binaların Yangından Korunması Hakkında Yönetmelik: kaçış mesafeleri, yangın merdiveni detayları",
+    "max_escape_distance_note": "~30m (Yangın Yönetmeliği referansı - PAİY'de doğrudan belirtilmez)"
+  },
+  "wet_area_rules": {
+    "ventilation_separation": true,
+    "ventilation_note": "Madde 29(6): Mutfak ve oda bacaları WC/banyo boşluğuna açılamaz",
+    "no_electrical_below": true,
+    "electrical_note": "Madde 29(7): Islak hacim altına enerji odası kurulamaz",
+    "stack_above_wet": true,
+    "stack_note": "Islak hacimlerin üst üste gelmesi tesisat açısından önerilir (PAİY'de doğrudan zorunluluk yok, ama pratikte standart)"
+  },
+  "wet_area_types": ["mutfak", "banyo", "tuvalet"],
+
+  "_comment_I": "── I) ERİŞİLEBİLİRLİK ────────────────────────────────────",
+
+  "accessibility": {
+    "external_ref": "TS 9111 (erişilebilirlik) ve Asansör Yönetmeliği (2014/33/AB)",
+    "note": "PAİY, ortak alanlarda TS 9111'e uyum gerektirir. Detaylar dış kaynaklarda."
+  },
+
+  "_comment_J": "── DİĞER ─────────────────────────────────────────────────",
+
+  "adjacency_rules": {
+    "mutfak_salon": "adjacent",
+    "banyo_tuvalet": "near",
+    "note": "Algoritmik yerleşim tercihleri"
+  },
+  "eskisehir_notes": "Parselin bağlı olduğu idarenin (Tepebaşı/Odunpazarı) imar durumu ve plan notları ek kısıt getirebilir"
+}
+`
+        },
+        streamlitConfig: {
+          "theme.base": "light",
+          "client.toolbarMode": "viewer",
+          "browser.gatherUsageStats": false
+        }
+      },
+      document.getElementById("root")
+    );
+  </script>
+</body>
+</html>

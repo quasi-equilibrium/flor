@@ -1,0 +1,219 @@
+{
+  "description": "PAİY (Planlı Alanlar İmar Yönetmeliği) - Resmi Minimumlar",
+  "paiy_reference": "Madde 5, 23, 28, 29, 30, 31, 32, 34, 38, 39. Son değişiklikler: RG 32838 (11.03.2025), RG 32985 (13.08.2025)",
+
+  "_comment_A": "── A) ODA / PİYES MİNİMUMLARI (Madde 29) ──────────────────",
+
+  "mandatory_rooms": {
+    "note": "Madde 5(25), 29(1): Her müstakil konutta zorunlu piyesler",
+    "list": ["salon", "yatak_odasi", "mutfak", "banyo", "tuvalet"]
+  },
+
+  "min_areas": {
+    "salon": 12.0,
+    "yatak_odasi": 9.0,
+    "oda": 9.0,
+    "mutfak": 3.3,
+    "banyo": 3.0,
+    "tuvalet": 1.2,
+    "antre": 2.0
+  },
+  "min_widths": {
+    "salon": 3.00,
+    "yatak_odasi": 2.50,
+    "oda": 2.00,
+    "mutfak": 1.50,
+    "banyo": 1.50,
+    "tuvalet": 1.00,
+    "antre": 1.20,
+    "koridor_daire": 1.20,
+    "koridor_bina": 1.50,
+    "merdiven": 3.00
+  },
+  "preferred_area_ratios": {
+    "salon": 0.25,
+    "yatak_odasi": 0.15,
+    "oda": 0.12,
+    "mutfak": 0.10,
+    "banyo": 0.05,
+    "tuvalet": 0.02,
+    "antre": 0.04
+  },
+
+  "_comment_B": "── B) BİNA İÇ DOLAŞIM ALANLARI (Madde 29, 30, 31, 34) ────",
+
+  "building_entry": {
+    "min_width": 1.50,
+    "note": "Madde 30(1): Ana merdiven ve asansöre ulaşana kadar min genişlik"
+  },
+  "building_corridor": {
+    "min_width": 1.50,
+    "note": "Madde 30(1): Bina giriş holü ve koridor min genişliği"
+  },
+  "apartment_corridor": {
+    "min_width": 1.20,
+    "note": "Madde 29(3): Daire içi hol/koridor min genişliği"
+  },
+
+  "_comment_C": "── C) MERDİVEN ÖLÇÜLERİ (Madde 31, 38) ─────────────────",
+
+  "stairs": {
+    "arm_width": 1.20,
+    "arm_width_note": "Madde 31(1a): Konut ortak merdiven kolu min genişlik",
+    "arm_width_other": 1.50,
+    "arm_width_other_note": "Madde 31(1a): Konut dışı yapılarda min genişlik",
+    "arm_width_internal": 1.00,
+    "arm_width_internal_note": "Madde 31(1a): Daire içi (dubleks) merdiven min genişlik",
+    "riser_max_with_elevator": 0.18,
+    "riser_max_without_elevator": 0.16,
+    "riser_note": "Madde 31(2a): Asansörlü/asansörsüz max rıht yüksekliği",
+    "tread_min": 0.27,
+    "tread_note": "Madde 31(2b): Min basamak genişliği. Formül: 2a+b = 60-64 cm",
+    "step_formula": "2a+b = 60..64 cm",
+    "gap": 0.10,
+    "landing_min_width": 1.20,
+    "landing_note": "Madde 31(1a): Kat sahanlığı merdiven kolu genişliğinden az olamaz",
+    "handrail_height": 1.10,
+    "handrail_note": "Madde 38(1): Merdiven ve boşluklarda korkuluk min yüksekliği",
+    "width": 3.00,
+    "length": 6.00,
+    "shaft_note": "Şaft tam kat yüksekliğini kaplar; genişlik 2×1.20m kol + boşluk + duvarlar"
+  },
+
+  "_comment_D": "── D) ASANSÖR GEREKSİNİMLERİ (Madde 5, 34) ──────────────",
+
+  "elevator_shaft": {
+    "cabin_min_width": 1.20,
+    "cabin_min_length": 1.50,
+    "cabin_min_area": 1.80,
+    "cabin_note": "Madde 34(2): Tek asansör kabin dar kenarı min 1.20m, alan min 1.80m²",
+    "door_min_width": 0.90,
+    "door_note": "Madde 34(2): Asansör kapı net geçiş min 0.90m",
+    "landing_min_sliding": 1.20,
+    "landing_min_swing": 1.50,
+    "landing_note": "Madde 34(2): Sürgülü kapıda min 1.20m, dışa açılır kapıda min 1.50m sahanlık",
+    "min_floors_required": 4,
+    "min_floors_space": 3,
+    "floors_note": "Madde 5(27), 34(1): 3 katta yer, 4+ katta montaj zorunlu",
+    "dual_elevator_floors": 10,
+    "dual_elevator_apartments": 20,
+    "dual_note": "Madde 34(4): 10 kat veya 20+ dairede min 2 asansör",
+    "fire_elevator_floors": 10,
+    "fire_note": "Madde 34(4): 10+ katlı binalarda 1 asansör yangına dayanıklı/güç kaynaklı",
+    "stretcher_min_floors": 10,
+    "stretcher_cabin_width": 1.20,
+    "stretcher_cabin_length": 2.10,
+    "stretcher_min_area": 2.52,
+    "stretcher_door_min": 1.10,
+    "stretcher_note": "Madde 34(5): 10+ katlı binalarda sedye asansörü min 1.20×2.10m (2.52m²), kapı min 1.10m",
+    "width": 2.50,
+    "length": 2.50,
+    "shaft_note": "Kuyu tam kat yüksekliğini kaplar"
+  },
+
+  "_comment_E": "── E) KAPI ve PENCERE ÖLÇÜLERİ (Madde 39) ───────────────",
+
+  "doors": {
+    "standard": {"width": 0.90, "height": 2.10},
+    "standard_note": "Madde 39(1c): Oda kapıları net genişlik min 0.90m",
+    "banyo": {"width": 0.80, "height": 2.10},
+    "tuvalet": {"width": 0.80, "height": 2.10},
+    "islak_hacim_note": "Madde 39(1c): Islak hacim ve balkon kapıları min 0.80m",
+    "balkon": {"width": 0.80, "height": 2.10},
+    "giris": {"width": 1.00, "height": 2.10},
+    "giris_note": "Madde 39(1c): Bağımsız bölüm (daire) giriş kapısı min 1.00m",
+    "bina_giris": {"width": 1.50, "height": 2.10},
+    "bina_giris_note": "Madde 39(1b): Bina giriş kapısı min 1.50m, çift kanatta bir kanat min 1.00m"
+  },
+  "windows": {
+    "min_area_ratio": 0.10,
+    "min_width": 0.80,
+    "standard_width": 1.20,
+    "standard_height": 1.20,
+    "sill_height": 0.90,
+    "banyo_width": 0.60,
+    "banyo_height": 0.60,
+    "banyo_sill_height": 1.50,
+    "ventilation_min_width": 0.30,
+    "ventilation_min_height": 0.30,
+    "ventilation_note": "Madde 39(6): Islak hacimlerde mekanik havalandırma yoksa min 0.30×0.30m pencere"
+  },
+
+  "_comment_F": "── F) DUVAR ve KAT YÜKSEKLİKLERİ (Madde 28) ─────────────",
+
+  "walls": {
+    "outer_thickness": 0.25,
+    "inner_thickness": 0.15,
+    "carrier_thickness": 0.20,
+    "note": "Duvar kalınlığı PAİY'de sabit değil; taşıyıcı sistem, deprem, enerji ve yangın mevzuatına göre belirlenir"
+  },
+  "floor_height": 2.80,
+  "floor_height_max": 3.60,
+  "floor_height_note": "Madde 28(1c): Konut bölgelerinde döşemeden döşemeye max 3.60m",
+  "min_ceiling_height": 2.60,
+  "min_ceiling_note": "Madde 28(4): İskân edilen kat iç yüksekliği (tavan net) min 2.60m",
+  "wet_area_ceiling_height": 2.20,
+  "wet_area_ceiling_note": "Madde 28(5): Islak hacim/koridor tavan yüksekliği 2.20m'ye düşebilir",
+
+  "_comment_G": "── G) PARSEL ve YERLEŞİM KISITLARI (Madde 23, 32) ────────",
+
+  "setbacks": {
+    "front_min": 5.00,
+    "front_note": "Madde 23(1a): Ön bahçe (yol kenarından bina cephesine) min 5.00m",
+    "side_min": 3.00,
+    "rear_min": 3.00,
+    "side_rear_note": "Madde 23(1b,c): Yan ve arka bahçe min 3.00m (4 kata kadar dahil)",
+    "floor_increment": 0.50,
+    "floor_increment_base": 4,
+    "increment_note": "Madde 23(1ç): 4 katın üzerinde her kat için mesafe +0.50m artırılır"
+  },
+  "lightwell": {
+    "small_min_edge": 1.50,
+    "small_min_area": 4.50,
+    "small_max_floors": 6,
+    "small_note": "Madde 32(2a): 1-6 kat arası ışıklık min 1.50m kenar, 4.50m² alan",
+    "large_min_edge": 2.00,
+    "large_min_area": 9.00,
+    "large_min_floors": 7,
+    "large_note": "Madde 32(2b): 7+ kat ışıklık min 2.00m kenar, 9.00m² alan",
+    "air_shaft_width": 0.60,
+    "air_shaft_length": 0.60,
+    "air_shaft_note": "Madde 32(3): Hava bacası min 0.60×0.60m, sadece banyo/WC havalandırması"
+  },
+
+  "_comment_H": "── H) YANGIN ve ISLAK HACİM KURALLARI ────────────────────",
+
+  "fire_safety": {
+    "separate_stairs_mixed_use": true,
+    "separate_stairs_note": "Madde 31(5): Karma kullanımda (konut + ticaret) ayrı merdiven evi zorunlu",
+    "fire_elevator_floors": 10,
+    "fire_elevator_note": "Madde 34(4): 10+ katlı binalarda 1 asansör yangına dayanıklı/güç kaynaklı",
+    "external_ref": "Binaların Yangından Korunması Hakkında Yönetmelik: kaçış mesafeleri, yangın merdiveni detayları",
+    "max_escape_distance_note": "~30m (Yangın Yönetmeliği referansı - PAİY'de doğrudan belirtilmez)"
+  },
+  "wet_area_rules": {
+    "ventilation_separation": true,
+    "ventilation_note": "Madde 29(6): Mutfak ve oda bacaları WC/banyo boşluğuna açılamaz",
+    "no_electrical_below": true,
+    "electrical_note": "Madde 29(7): Islak hacim altına enerji odası kurulamaz",
+    "stack_above_wet": true,
+    "stack_note": "Islak hacimlerin üst üste gelmesi tesisat açısından önerilir (PAİY'de doğrudan zorunluluk yok, ama pratikte standart)"
+  },
+  "wet_area_types": ["mutfak", "banyo", "tuvalet"],
+
+  "_comment_I": "── I) ERİŞİLEBİLİRLİK ────────────────────────────────────",
+
+  "accessibility": {
+    "external_ref": "TS 9111 (erişilebilirlik) ve Asansör Yönetmeliği (2014/33/AB)",
+    "note": "PAİY, ortak alanlarda TS 9111'e uyum gerektirir. Detaylar dış kaynaklarda."
+  },
+
+  "_comment_J": "── DİĞER ─────────────────────────────────────────────────",
+
+  "adjacency_rules": {
+    "mutfak_salon": "adjacent",
+    "banyo_tuvalet": "near",
+    "note": "Algoritmik yerleşim tercihleri"
+  },
+  "eskisehir_notes": "Parselin bağlı olduğu idarenin (Tepebaşı/Odunpazarı) imar durumu ve plan notları ek kısıt getirebilir"
+}
