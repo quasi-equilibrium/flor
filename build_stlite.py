@@ -22,8 +22,8 @@ PROJECT_ROOT = Path(__file__).parent
 DOCS_DIR = PROJECT_ROOT / "docs"
 OUTPUT_FILE = DOCS_DIR / "index.html"
 
-# stlite CDN versiyonu (README orneklerinde dogrulanmis surum)
-STLITE_VERSION = "0.83.1"
+# stlite CDN versiyonu (en son stabil surum)
+STLITE_VERSION = "1.0.1"
 
 # Pyodide'da yuklenmesi gereken paketler
 # NOT: shapely, networkx, ezdxf kullanilmiyor veya Pyodide'da yok
