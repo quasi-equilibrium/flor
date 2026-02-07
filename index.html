@@ -6,7 +6,7 @@
   <title>Kat Plani Uretici - PAiY Uyumlu</title>
   <link
     rel="stylesheet"
-    href="https://cdn.jsdelivr.net/npm/@stlite/browser@0.76.0/build/stlite.css"
+    href="https://cdn.jsdelivr.net/npm/@stlite/browser@0.83.1/build/stlite.css"
   />
   <style>
     /* Yukleme ekrani */
@@ -57,9 +57,9 @@
 
   <div id="root"></div>
 
-  <script src="https://cdn.jsdelivr.net/npm/@stlite/browser@0.76.0/build/stlite.js"></script>
+  <script type="module">
+    import { mount } from "https://cdn.jsdelivr.net/npm/@stlite/browser@0.83.1/build/stlite.js";
 
-  <script>
     // Yukleme ekranini stlite hazir olunca kaldir
     const observer = new MutationObserver(function(mutations) {
       const stApp = document.querySelector('.stApp');
@@ -75,7 +75,7 @@
     });
     observer.observe(document.body, { childList: true, subtree: true });
 
-    stlite.mount(
+    mount(
       {
         requirements: ["numpy", "matplotlib", "pydantic"],
         entrypoint: "app.py",

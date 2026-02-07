@@ -22,8 +22,8 @@ PROJECT_ROOT = Path(__file__).parent
 DOCS_DIR = PROJECT_ROOT / "docs"
 OUTPUT_FILE = DOCS_DIR / "index.html"
 
-# stlite CDN versiyonu
-STLITE_VERSION = "0.76.0"
+# stlite CDN versiyonu (README orneklerinde dogrulanmis surum)
+STLITE_VERSION = "0.83.1"
 
 # Pyodide'da yuklenmesi gereken paketler
 # NOT: shapely, networkx, ezdxf kullanilmiyor veya Pyodide'da yok
@@ -157,9 +157,9 @@ def build_html() -> str:
 
   <div id="root"></div>
 
-  <script src="https://cdn.jsdelivr.net/npm/@stlite/browser@{STLITE_VERSION}/build/stlite.js"></script>
+  <script type="module">
+    import {{ mount }} from "https://cdn.jsdelivr.net/npm/@stlite/browser@{STLITE_VERSION}/build/stlite.js";
 
-  <script>
     // Yukleme ekranini stlite hazir olunca kaldir
     const observer = new MutationObserver(function(mutations) {{
       const stApp = document.querySelector('.stApp');
@@ -175,7 +175,7 @@ def build_html() -> str:
     }});
     observer.observe(document.body, {{ childList: true, subtree: true }});
 
-    stlite.mount(
+    mount(
       {{
         requirements: {requirements_js},
         entrypoint: "app.py",
